@@ -1,4 +1,5 @@
 import dns from 'node:dns';
+import { ChatInputCommandInteraction } from 'discord.js';
 import { Agent, setGlobalDispatcher } from 'undici';
 
 dns.setDefaultResultOrder('ipv4first');
@@ -14,6 +15,25 @@ const dispatcher = new Agent({
 });
 
 setGlobalDispatcher(dispatcher);
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function isTransientConnectError(error) {
+  const code = error?.code ?? error?.cause?.code;
+  return code === 'UND_ERR_CONNECT_TIMEOUT' || error?.name === 'ConnectTimeoutError' || error?.cause?.name === 'ConnectTimeoutError';
+}
+
+const originalDeferReply = ChatInputCommandInteraction.prototype.deferReply;
+ChatInputCommandInteraction.prototype.deferReply = async function patchedDeferReply(...args) {
+  try {
+    return await originalDeferReply.apply(this, args);
+  } catch (error) {
+    const age = Date.now() - this.createdTimestamp;
+    if (!isTransientConnectError(error) || age > 1700) throw error;
+    await sleep(50);
+    return originalDeferReply.apply(this, args);
+  }
+};
 
 let lastHealthy = true;
 
