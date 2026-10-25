@@ -441,10 +441,11 @@ async function migrateLegacyConfig(scope, id, config) {
 
   const oldPanel = await panel(config);
   const selectedEvents = [];
+  const reactionCache = oldPanel?.reactions?.cache;
 
-  if (oldPanel) {
+  if (reactionCache) {
     for (const event of EVENTS) {
-      const reaction = oldPanel.reactions.cache.find((item) => norm(item.emoji.name) === norm(event.emoji));
+      const reaction = reactionCache.find((item) => norm(item.emoji.name) === norm(event.emoji));
       if (!reaction) continue;
       const users = await reaction.users.fetch().catch(() => null);
       if (users?.has(config.ownerUserId)) selectedEvents.push(event.name);
@@ -454,13 +455,17 @@ async function migrateLegacyConfig(scope, id, config) {
   config.selectedEvents = selectedEvents;
 
   if (oldPanel?.channel?.isTextBased()) {
-    const newPanel = await oldPanel.channel.send({
-      embeds: [panelEmbed(config)],
-      components: panelComponents(config),
-    });
-    config.panelMessageId = newPanel.id;
-    config.panelChannelId = newPanel.channel.id;
-    await oldPanel.delete().catch(() => null);
+    try {
+      const newPanel = await oldPanel.channel.send({
+        embeds: [panelEmbed(config)],
+        components: panelComponents(config),
+      });
+      config.panelMessageId = newPanel.id;
+      config.panelChannelId = newPanel.channel.id;
+      await oldPanel.delete().catch(() => null);
+    } catch (error) {
+      console.warn(`Could not replace legacy panel for ${scope} ${id}:`, error.message);
+    }
   }
 
   console.log(`Migrated ${scope} ${id} from reactions to components (${selectedEvents.length} selections)`);
@@ -471,16 +476,32 @@ async function migrateLegacyPanels() {
   let dirty = false;
 
   for (const [id, config] of Object.entries(state.guilds)) {
-    dirty = (await migrateLegacyConfig('guild', id, config)) || dirty;
+    try {
+      dirty = (await migrateLegacyConfig('guild', id, config)) || dirty;
+    } catch (error) {
+      console.warn(`Could not migrate legacy guild ${id}:`, error.message);
+      if (!Array.isArray(config.selectedEvents)) {
+        config.selectedEvents = [];
+        dirty = true;
+      }
+    }
   }
   for (const [id, config] of Object.entries(state.users)) {
-    dirty = (await migrateLegacyConfig('dm', id, config)) || dirty;
+    try {
+      dirty = (await migrateLegacyConfig('dm', id, config)) || dirty;
+    } catch (error) {
+      console.warn(`Could not migrate legacy DM ${id}:`, error.message);
+      if (!Array.isArray(config.selectedEvents)) {
+        config.selectedEvents = [];
+        dirty = true;
+      }
+    }
   }
 
   if (dirty) await persist();
 }
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   await loadState();
   await migrateLegacyPanels();
