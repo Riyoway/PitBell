@@ -4,87 +4,109 @@
 
 <br>
 
-<img src="assets/icon.webp" alt="Pit Event Notifier icon" width="128">
+<img src="assets/icon.webp" alt="PitBell icon" width="128">
 
-# Pit Event Notifier
+# PitBell
 
 **Discord reminders for selected Hypixel Pit events.**
 
-Choose the events you care about from a multi-select menu and get mentioned before they start, in a server or directly in the bot's DMs.
+Choose the events you care about and get mentioned before they start, either in a server channel or privately in DM.
 
 </div>
 
 ---
 
-## Features
-
-- 🔔 Notifications for selected **Major** and **Minor** Pit events
-- 🎛️ Multi-select event menu with native Discord components
-- ⚡ Quick buttons for **Minor**, **Major**, **All**, **Clear**, and **Pause / Resume**
-- ⌛ Setup panels automatically expire and are replaced with an expired-state message
-- 💬 Works in Discord servers and bot DMs
-- ⏱️ Configurable reminders from 1 to 30 minutes before an event
-- 🕒 Discord relative timestamps for upcoming events
-- 📺 Streaming presence showing the current or next Pit event
-- 💾 Persistent configuration with duplicate-notification protection
-- 🔄 Automatic migration from the old reaction-based setup
-- ⚡ Direct event-schedule fetching with no HTML scraping
-- 🛡️ No Message Content privileged intent required
-
-The bot uses the same public event schedule consumed by [brookeafk.com](https://brookeafk.com/).
-
-## Quick start
-
-### Server
+## Getting started
 
 Run:
+
+```text
+/pit help
+```
+
+PitBell supports two separate notification modes.
+
+### Server notifications
+
+A server manager runs:
+
+```text
+/pit setup
+```
+
+Optional arguments:
 
 ```text
 /pit setup channel:#pit-events minutes:5
 ```
 
-`channel` is optional. If omitted, the bot uses the channel where the command was run.
+The setup panel is posted in the selected channel. Server settings require **Manage Server**.
 
-The user who runs `/pit setup` becomes the notification owner for that server configuration. Use the dropdown to select events, or use the quick-selection buttons below it. Reminders mention that user.
+### Personal DM notifications
 
-### DM
-
-Open a DM with the bot and run:
+Any user can run this from a server where PitBell is installed:
 
 ```text
-/pit setup minutes:5
+/pit dm
 ```
 
-The setup panel is posted directly in the DM. Choose events from the dropdown and selected event reminders are sent back to the same DM.
+PitBell will send that user a private setup panel in DM. Personal DM settings are separate from server settings.
 
-## Setup panel
+You can also open a DM with PitBell directly and run:
 
-The panel uses Discord's native message components instead of reactions:
+```text
+/pit setup
+```
 
-- **Event dropdown** — select one or multiple events at once
-- **Minor** — select every Minor event
-- **Major** — select every Major event
-- **All** — select all supported events
-- **Clear** — remove all event selections
-- **Pause / Resume** — stop or restart reminders without losing the selection
+If PitBell cannot send you a DM, it returns a clear error telling you to check your Discord DM privacy settings.
 
-By default, a setup panel expires after **15 minutes**. When it expires, the original message is updated to show that the panel is no longer interactive and its components are removed. Your selected events, reminder time, pause state, and notification target remain saved. Run `/pit setup` again to open a fresh panel.
+## Features
 
-Existing reaction-based configurations are migrated automatically on startup when possible.
+- 🔔 Notifications for selected **Major** and **Minor** Pit events
+- 🎛️ Native Discord multi-select menu
+- ⚡ Quick buttons for **Minor**, **Major**, **All**, **Clear**, and **Pause / Resume**
+- 💬 Server and personal DM notification modes
+- ⏱️ Configurable reminders from 1 to 30 minutes before an event
+- ⌛ Setup controls automatically expire while saved settings remain intact
+- 🕒 Upcoming-event command with Discord timestamps
+- 📺 Streaming presence showing the current or next Pit event
+- 💾 Persistent configuration in `data/state.json`
+- ⚡ Direct event-schedule fetching with no HTML scraping
+- 🛡️ No Message Content privileged intent required
+- ❌ User-facing error messages with an Error ID for troubleshooting
+
+The bot uses the same public event schedule consumed by [brookeafk.com](https://brookeafk.com/).
 
 ## Commands
 
 | Command | Description |
 | --- | --- |
-| `/pit setup [channel] [minutes]` | Create or replace the event selection panel |
-| `/pit minutes value:3` | Change the reminder lead time |
-| `/pit pause` | Pause notifications while keeping all settings |
-| `/pit resume` | Resume notifications with the existing settings |
-| `/pit status` | Show the current configuration and pause state |
-| `/pit upcoming count:10` | Show upcoming Pit events |
-| `/pit reset` | Remove the current configuration and stop notifications |
+| `/pit help` | Show server and DM setup instructions |
+| `/pit setup [channel] [minutes]` | Create or refresh the current setup panel |
+| `/pit dm [minutes]` | Create or refresh your personal DM setup |
+| `/pit upcoming [count]` | Show upcoming Pit events |
+| `/pit status` | Show the current setup status |
+| `/pit minutes value:5` | Change reminder lead time |
+| `/pit pause` | Pause notifications without deleting settings |
+| `/pit resume` | Resume notifications |
+| `/pit reset` | Delete the current setup |
 
-In servers, changing notification settings requires **Manage Server**. `/pit upcoming` can be used without changing the configuration.
+In a server, `/pit setup`, `/pit minutes`, `/pit pause`, `/pit resume`, and `/pit reset` require **Manage Server**. `/pit help`, `/pit dm`, `/pit upcoming`, and `/pit status` can be used without changing server configuration.
+
+## Setup panel
+
+The panel uses Discord message components instead of reactions:
+
+- **Event dropdown** — choose one or multiple events
+- **Minor** — select all Minor events
+- **Major** — select all Major events
+- **All** — select every supported event
+- **Clear** — remove all selections
+- **Pause / Resume** — stop or resume reminders without losing settings
+
+By default, the interactive controls expire after **15 minutes**. The original message is updated to an expired state and the components are removed, but the selected events, reminder time, pause state, and notification target remain saved.
+
+Run `/pit setup` for a fresh server panel or `/pit dm` for a fresh personal DM panel.
 
 ## Supported events
 
@@ -134,34 +156,24 @@ In servers, changing notification settings requires **Manage Server**. `/pit upc
 - Node.js 20 or newer
 - A Discord application with a bot user
 
-Clone the repository and install dependencies:
-
 ```bash
 git clone https://github.com/Riyoway/pit-event-bot.git
 cd pit-event-bot
 npm install
 ```
 
-Create the environment file:
-
-```bash
-cp .env.example .env
-```
-
-PowerShell:
+Create `.env` from the example:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Configure `.env`:
+Configure it:
 
 ```env
 DISCORD_TOKEN=your_bot_token
 DISCORD_CLIENT_ID=your_application_id
-# Optional: URL used by the Discord Streaming presence
 STREAM_URL=https://www.twitch.tv/hypixel
-# Optional: setup panel lifetime in minutes
 PANEL_TIMEOUT_MINUTES=15
 ```
 
@@ -170,7 +182,7 @@ PANEL_TIMEOUT_MINUTES=15
 
 ## Discord application setup
 
-In the Discord Developer Portal, use **Guild Install** with these scopes:
+Use **Guild Install** with these scopes:
 
 - `bot`
 - `applications.commands`
@@ -182,11 +194,9 @@ Recommended bot permissions:
 - Embed Links
 - Read Message History
 
-No privileged gateway intents are required. Select menus and buttons do not require additional bot permissions.
+No privileged gateway intents are required.
 
-The `/pit` command is registered globally with both **Guild** and **Bot DM** command contexts. Global registration is required for DM command support.
-
-This project uses a normal bot installation for proactive scheduled DM reminders. It does not rely on a User Install-only app.
+The `/pit` command is registered globally with both **Guild** and **Bot DM** command contexts.
 
 ## Running
 
@@ -200,47 +210,29 @@ Syntax check:
 npm run check
 ```
 
-## Pausing notifications
+## Errors
 
-Use the **Pause** button on the setup panel or run:
+Commands and component actions acknowledge Discord interactions before doing slower work, which avoids interaction timeouts during API or message operations.
 
-```text
-/pit pause
-```
-
-This pauses reminders while keeping:
-
-- selected events
-- reminder lead time
-- server channel or DM delivery target
-- notification owner
-
-Resume from the panel or with:
+When an operation fails, PitBell returns a user-facing message such as:
 
 ```text
-/pit resume
+❌ I could not send you a DM. Please enable DMs for this server and try /pit dm again.
+
+Error ID: PIT-XXXXXX-XXX
 ```
 
-Events whose normal reminder time passed while notifications were paused are not sent later as catch-up notifications.
-
-## Notification example
-
-```text
-@User
-🍕 Pizza
-A MAJOR event is starting soon.
-Starts: in 5 minutes
-```
+The same Error ID is written to the bot console with the full error for debugging.
 
 ## Event data source
 
-The bot fetches the public schedule from:
+The bot fetches:
 
 ```text
 https://raw.githubusercontent.com/BrookeAFK/brookeafk-api/main/events.js
 ```
 
-Entries contain an event name, timestamp, and Major/Minor type. The schedule is refreshed periodically. If a refresh fails, the last successfully fetched schedule is kept in memory.
+Entries contain an event name, timestamp, and Major/Minor type. If a refresh fails, the last successfully fetched schedule is kept in memory.
 
 ## Runtime data
 
@@ -250,7 +242,7 @@ Configuration and duplicate-notification state are stored locally in:
 data/state.json
 ```
 
-The file is ignored by Git and is created automatically at runtime.
+The file is ignored by Git and created automatically at runtime.
 
 ## License
 
