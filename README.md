@@ -1,28 +1,40 @@
+<div align="center">
+
+<img src="assets/banner.webp" alt="Hypixel Pit Event Bot banner" width="100%">
+
+<br>
+
+<img src="assets/icon.webp" alt="Pit Event Notifier icon" width="128">
+
 # Pit Event Notifier
 
-A lightweight Discord bot for Hypixel Pit event reminders in servers and bot DMs.
+**Discord reminders for selected Hypixel Pit events.**
 
-The bot uses the same public event schedule consumed by [brookeafk.com](https://brookeafk.com/) and lets you choose which events to receive reminders for with emoji reactions.
+Choose the events you care about with emoji reactions and get mentioned before they start, in a server or directly in the bot's DMs.
+
+</div>
+
+---
 
 ## Features
 
-- Slash commands
-- Server and bot-DM support
-- Major and Minor Pit events
-- Emoji-based event selection
-- Mentions the user who ran `/pit setup`
-- Configurable reminder time from 1 to 30 minutes before an event
-- Pause and resume notifications without losing settings
-- Discord relative timestamps
-- Persistent configuration and duplicate-notification protection
-- Direct schedule fetching with no HTML scraping
-- No Message Content privileged intent required
+- 🔔 Notifications for selected **Major** and **Minor** Pit events
+- 🎯 Emoji-based event selection
+- 💬 Works in Discord servers and bot DMs
+- ⏱️ Configurable reminders from 1 to 30 minutes before an event
+- ⏸️ Pause and resume notifications without losing your setup
+- 🕒 Discord relative timestamps for upcoming events
+- 💾 Persistent configuration with duplicate-notification protection
+- ⚡ Direct event-schedule fetching with no HTML scraping
+- 🛡️ No Message Content privileged intent required
 
-## How it works
+The bot uses the same public event schedule consumed by [brookeafk.com](https://brookeafk.com/).
 
-Run `/pit setup`, then react to the events you want to follow.
+## Quick start
 
 ### Server
+
+Run:
 
 ```text
 /pit setup channel:#pit-events minutes:5
@@ -40,7 +52,7 @@ Open a DM with the bot and run:
 /pit setup minutes:5
 ```
 
-The setup panel is posted directly in the DM. Selected event reminders are then sent to the same DM and mention the user who configured them.
+The setup panel is posted directly in the DM. Selected event reminders are sent back to the same DM and mention the user who configured them.
 
 ## Commands
 
@@ -58,6 +70,10 @@ In servers, changing notification settings requires **Manage Server**. `/pit upc
 
 ## Supported events
 
+<table>
+<tr>
+<td valign="top">
+
 ### Minor
 
 | Emoji | Event |
@@ -71,6 +87,9 @@ In servers, changing notification settings requires **Manage Server**. `/pit upc
 | 💵 | Auction |
 | 🍰 | Giant Cake |
 | 🪙 | All bounty |
+
+</td>
+<td valign="top">
 
 ### Major
 
@@ -86,12 +105,18 @@ In servers, changing notification settings requires **Manage Server**. `/pit upc
 | 🎟️ | Raffle |
 | 🆚 | Team Deathmatch |
 
-## Requirements
+</td>
+</tr>
+</table>
+
+## Installation
+
+### Requirements
 
 - Node.js 20 or newer
 - A Discord application with a bot user
 
-## Installation
+Clone the repository and install dependencies:
 
 ```bash
 git clone https://github.com/Riyoway/pit-event-bot.git
@@ -118,7 +143,8 @@ DISCORD_TOKEN=your_bot_token
 DISCORD_CLIENT_ID=your_application_id
 ```
 
-Never commit `.env` or your bot token.
+> [!IMPORTANT]
+> Never commit `.env` or your bot token.
 
 ## Discord application setup
 
@@ -155,11 +181,13 @@ npm run check
 
 ## Pausing notifications
 
+Run:
+
 ```text
 /pit pause
 ```
 
-This pauses reminders but keeps:
+This pauses reminders while keeping:
 
 - selected event reactions
 - reminder lead time
