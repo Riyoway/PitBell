@@ -52,15 +52,15 @@ const EVENTS = Object.freeze([
 ].map(([name, emoji, type, durationSeconds]) => ({ name, emoji, type, durationSeconds })));
 
 const byName = new Map(EVENTS.map((event) => [event.name, event]));
-const normalizeEmoji = (value) => String(value ?? '').replace(/\uFE0F/g, '');
 
 const command = new SlashCommandBuilder()
   .setName('pit')
   .setDescription('Hypixel Pit event notifications')
+  .addSubcommand((sub) => sub.setName('help').setDescription('Show how to set up server and DM notifications'))
   .addSubcommand((sub) =>
     sub
       .setName('setup')
-      .setDescription('Create or replace your event notification setup')
+      .setDescription('Create or refresh the notification control panel')
       .addChannelOption((option) => option.setName('channel').setDescription('Server channel for the panel and notifications'))
       .addIntegerOption((option) =>
         option.setName('minutes').setDescription('Notify this many minutes before an event').setMinValue(1).setMaxValue(30),
@@ -68,8 +68,16 @@ const command = new SlashCommandBuilder()
   )
   .addSubcommand((sub) =>
     sub
+      .setName('dm')
+      .setDescription('Set up your personal event notifications in DM')
+      .addIntegerOption((option) =>
+        option.setName('minutes').setDescription('Notify this many minutes before an event').setMinValue(1).setMaxValue(30),
+      ),
+  )
+  .addSubcommand((sub) =>
+    sub
       .setName('minutes')
-      .setDescription('Change the notification lead time')
+      .setDescription('Change the notification lead time for this setup')
       .addIntegerOption((option) =>
         option.setName('value').setDescription('Minutes before the event').setMinValue(1).setMaxValue(30).setRequired(true),
       ),
@@ -109,6 +117,10 @@ const bucketKey = (scope, id) => `${scope}:${id}`;
 const eventKey = (event) => `${event.timestamp}:${event.event}`;
 const toUnix = (ms) => Math.floor(ms / 1000);
 
+function errorId() {
+  return `PIT-${Date.now().toString(36).slice(-6).toUpperCase()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+}
+
 function snowflakeTimestamp(id) {
   try {
     return Number((BigInt(id) >> 22n) + DISCORD_EPOCH);
@@ -121,6 +133,45 @@ function selectedNames(config) {
   return Array.isArray(config?.selectedEvents) ? config.selectedEvents.filter((name) => byName.has(name)) : [];
 }
 
+function helpEmbed() {
+  return new EmbedBuilder()
+    .setTitle('PitBell Help')
+    .setDescription('Choose whether you want notifications in a server channel or privately in DM.')
+    .addFields(
+      {
+        name: '🏠 Server notifications',
+        value:
+          'A server manager runs `/pit setup` in the server.\n' +
+          'Optionally choose `channel` and `minutes`. The setup panel appears in that channel.',
+      },
+      {
+        name: '💬 Personal DM notifications',
+        value:
+          'Run `/pit dm` from any server where PitBell is installed. PitBell will send your private setup panel in DM.\n' +
+          'You can also open a DM with PitBell and run `/pit setup` there.',
+      },
+      {
+        name: '🎛️ Selecting events',
+        value:
+          'Use the dropdown to pick individual events, or the **Minor**, **Major**, **All**, and **Clear** buttons. ' +
+          'Use **Pause / Resume** to keep your settings without receiving reminders.',
+      },
+      {
+        name: '⌨️ Commands',
+        value:
+          '`/pit help` — this guide\n' +
+          '`/pit setup` — server setup, or DM setup when used inside DM\n' +
+          '`/pit dm` — open your personal DM setup\n' +
+          '`/pit upcoming` — upcoming events\n' +
+          '`/pit status` — current settings\n' +
+          '`/pit minutes` — reminder lead time\n' +
+          '`/pit pause` / `/pit resume` — temporarily stop/start reminders\n' +
+          '`/pit reset` — delete the current setup',
+      },
+    )
+    .setFooter({ text: 'Server settings require Manage Server. Personal DM settings belong only to you.' });
+}
+
 function panelEmbed(config) {
   const selected = selectedNames(config);
   const selectedText = selected.length
@@ -128,7 +179,7 @@ function panelEmbed(config) {
     : '*No events selected yet.*';
 
   return new EmbedBuilder()
-    .setTitle('Hypixel Pit Event Notifications')
+    .setTitle(config.mode === 'dm' ? 'PitBell · Personal DM Notifications' : 'Hypixel Pit Event Notifications')
     .setDescription(
       `<@${config.ownerUserId}>: choose the events you want from the dropdown below.\n` +
         'Use the buttons for quick selection, pausing, or clearing your subscriptions.',
@@ -137,6 +188,7 @@ function panelEmbed(config) {
       { name: 'Selected Events', value: selectedText },
       { name: 'Reminder', value: `${config.leadMinutes ?? DEFAULT_LEAD} minute(s) before`, inline: true },
       { name: 'Status', value: config.paused ? '⏸️ Paused' : '🟢 Active', inline: true },
+      { name: 'Delivery', value: config.mode === 'dm' ? '💬 Direct Message' : '🏠 Server channel', inline: true },
     )
     .setFooter({ text: `Controls expire after ${PANEL_TIMEOUT_MINUTES} minutes · Schedule source: brookeafk.com` })
     .setTimestamp();
@@ -145,10 +197,11 @@ function panelEmbed(config) {
 function expiredPanelEmbed(config) {
   const selected = selectedNames(config);
   return new EmbedBuilder()
-    .setTitle('Hypixel Pit Event Notifications')
+    .setTitle(config.mode === 'dm' ? 'PitBell · Personal DM Notifications' : 'Hypixel Pit Event Notifications')
     .setDescription(
       '⌛ **This setup panel has expired.**\n\n' +
-        'Your selected events, reminder time, and notification state are still saved. Run `/pit setup` to open a fresh control panel.',
+        'Your selected events, reminder time, and notification state are still saved. ' +
+        `Run ${config.mode === 'dm' ? '`/pit dm` or `/pit setup` in this DM' : '`/pit setup`'} to open a fresh control panel.`,
     )
     .addFields(
       { name: 'Selected Events', value: selected.length ? `${selected.length} selected` : 'None', inline: true },
@@ -215,7 +268,7 @@ function upcomingEmbed(events) {
 
   return new EmbedBuilder()
     .setTitle('Upcoming Hypixel Pit Events')
-    .setDescription(body || 'No upcoming events were returned by the source.')
+    .setDescription(body || 'No upcoming events were returned by the schedule source.')
     .setFooter({ text: 'Source: brookeafk.com event data' })
     .setTimestamp();
 }
@@ -281,13 +334,32 @@ function persistState() {
   return saveQueue;
 }
 
+function normalizeStoredState() {
+  let dirty = false;
+  for (const config of [...Object.values(state.guilds), ...Object.values(state.users)]) {
+    if (!Array.isArray(config.selectedEvents)) {
+      config.selectedEvents = [];
+      dirty = true;
+    }
+    if (!config.panelCreatedAt && config.panelMessageId) {
+      config.panelCreatedAt = snowflakeTimestamp(config.panelMessageId) ?? Date.now();
+      dirty = true;
+    }
+    if (config.panelExpiredAt === undefined) {
+      config.panelExpiredAt = null;
+      dirty = true;
+    }
+  }
+  return dirty;
+}
+
 async function fetchSchedule(force = false) {
   const now = Date.now();
   if (!force && scheduleCache.events.length && now - scheduleCache.fetchedAt < SOURCE_REFRESH_MS) return scheduleCache.events;
 
   try {
     const response = await fetch(`${SOURCE_URL}?t=${now}`, {
-      headers: { 'User-Agent': 'pit-event-notifier/1.5', 'Cache-Control': 'no-cache' },
+      headers: { 'User-Agent': 'pit-event-notifier/1.6', 'Cache-Control': 'no-cache' },
       signal: AbortSignal.timeout(10_000),
     });
     if (!response.ok) throw new Error(`Schedule source returned HTTP ${response.status}`);
@@ -345,7 +417,6 @@ async function expirePanel(config) {
       console.warn(`Could not expire panel ${config.panelMessageId}:`, error.message),
     );
   }
-
   config.panelExpiredAt = Date.now();
   return true;
 }
@@ -357,57 +428,12 @@ async function expirePanels() {
   if (dirty) await persistState();
 }
 
-async function migrateLegacyConfig(scope, id, config) {
-  if (Array.isArray(config.selectedEvents)) return false;
-  const oldPanel = await getPanel(config);
-  const selectedEvents = [];
-  const reactionCache = oldPanel?.reactions?.cache;
-
-  if (reactionCache) {
-    for (const event of EVENTS) {
-      const reaction = reactionCache.find((item) => normalizeEmoji(item.emoji.name) === normalizeEmoji(event.emoji));
-      if (!reaction) continue;
-      const users = await reaction.users.fetch().catch(() => null);
-      if (users?.has(config.ownerUserId)) selectedEvents.push(event.name);
-    }
-  }
-
-  config.selectedEvents = selectedEvents;
-  config.panelCreatedAt ??= config.panelMessageId ? snowflakeTimestamp(config.panelMessageId) : Date.now();
-  console.log(`Migrated ${scope} ${id} from reactions (${selectedEvents.length} selections)`);
-  return true;
-}
-
-async function migrateLegacyState() {
-  let dirty = false;
-  for (const [id, config] of Object.entries(state.guilds)) {
-    try {
-      dirty = (await migrateLegacyConfig('guild', id, config)) || dirty;
-    } catch (error) {
-      console.warn(`Could not migrate legacy guild ${id}:`, error.message);
-      config.selectedEvents ??= [];
-      dirty = true;
-    }
-  }
-  for (const [id, config] of Object.entries(state.users)) {
-    try {
-      dirty = (await migrateLegacyConfig('dm', id, config)) || dirty;
-    } catch (error) {
-      console.warn(`Could not migrate legacy DM ${id}:`, error.message);
-      config.selectedEvents ??= [];
-      dirty = true;
-    }
-  }
-  if (dirty) await persistState();
-}
-
 async function sendNotification(scope, config, event) {
   if (!selectedNames(config).includes(event.event)) return true;
   let channel;
 
-  if (scope === 'guild') {
-    channel = await client.channels.fetch(config.notifyChannelId).catch(() => null);
-  } else {
+  if (scope === 'guild') channel = await client.channels.fetch(config.notifyChannelId).catch(() => null);
+  else {
     const user = await client.users.fetch(config.ownerUserId).catch(() => null);
     channel = await user?.createDM().catch(() => null);
   }
@@ -489,15 +515,116 @@ function configForComponent(interaction) {
   return interaction.inGuild() ? state.guilds[interaction.guildId] : state.users[interaction.user.id];
 }
 
+function currentStoreAndId(interaction) {
+  if (interaction.inGuild()) return { store: state.guilds, id: interaction.guildId, scope: 'guild' };
+  return { store: state.users, id: interaction.user.id, scope: 'dm' };
+}
+
 async function acknowledgeCommand(interaction) {
   if (interaction.inGuild()) await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   else await interaction.deferReply();
 }
 
+async function createServerSetup(interaction, minutes) {
+  const id = interaction.guildId;
+  const previous = state.guilds[id];
+  const channel = interaction.options.getChannel('channel') ?? interaction.channel;
+
+  if (!channel?.isTextBased()) throw new Error('Selected channel is not text-based.');
+  const permissions = channel.permissionsFor(interaction.guild.members.me);
+  const needed = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks, PermissionFlagsBits.ReadMessageHistory];
+  if (needed.some((permission) => !permissions?.has(permission))) {
+    const error = new Error('Missing required permissions in the selected channel.');
+    error.userMessage = 'I need **View Channel**, **Send Messages**, **Embed Links**, and **Read Message History** in that channel.';
+    throw error;
+  }
+
+  const oldPanel = previous ? await getPanel(previous) : null;
+  const config = {
+    mode: 'guild',
+    panelChannelId: channel.id,
+    panelMessageId: null,
+    panelCreatedAt: Date.now(),
+    panelExpiredAt: null,
+    notifyChannelId: channel.id,
+    leadMinutes: minutes ?? previous?.leadMinutes ?? DEFAULT_LEAD,
+    ownerUserId: interaction.user.id,
+    selectedEvents: selectedNames(previous),
+    paused: previous?.paused ?? false,
+    resumeAt: previous?.resumeAt ?? null,
+  };
+
+  const message = await channel.send({ embeds: [panelEmbed(config)], components: panelComponents(config) });
+  config.panelMessageId = message.id;
+  state.guilds[id] = config;
+  delete state.notified[bucketKey('guild', id)];
+  await persistState();
+  if (oldPanel && oldPanel.id !== message.id) await oldPanel.delete().catch(() => null);
+  return config;
+}
+
+async function createDmSetup(user, minutes) {
+  const id = user.id;
+  const previous = state.users[id];
+  let dm;
+  try {
+    dm = await user.createDM();
+  } catch (error) {
+    error.userMessage = 'I could not open a DM with you. Please allow direct messages from server members, then run `/pit dm` again.';
+    throw error;
+  }
+
+  const oldPanel = previous ? await getPanel(previous) : null;
+  const config = {
+    mode: 'dm',
+    panelChannelId: dm.id,
+    panelMessageId: null,
+    panelCreatedAt: Date.now(),
+    panelExpiredAt: null,
+    notifyChannelId: null,
+    leadMinutes: minutes ?? previous?.leadMinutes ?? DEFAULT_LEAD,
+    ownerUserId: id,
+    selectedEvents: selectedNames(previous),
+    paused: previous?.paused ?? false,
+    resumeAt: previous?.resumeAt ?? null,
+  };
+
+  let message;
+  try {
+    message = await dm.send({ embeds: [panelEmbed(config)], components: panelComponents(config) });
+  } catch (error) {
+    error.userMessage = 'I could not send you a DM. Please enable DMs for this server and try `/pit dm` again.';
+    throw error;
+  }
+
+  config.panelMessageId = message.id;
+  state.users[id] = config;
+  delete state.notified[bucketKey('dm', id)];
+  await persistState();
+  if (oldPanel && oldPanel.id !== message.id) await oldPanel.delete().catch(() => null);
+  return config;
+}
+
+async function replyFailure(interaction, error, context = 'interaction') {
+  const id = errorId();
+  console.error(`[${id}] ${context}:`, error);
+  const userMessage = error?.userMessage ?? 'Something went wrong while processing that request.';
+  const content = `❌ ${userMessage}\n\nError ID: \`${id}\``;
+
+  if (!interaction.isRepliable()) return;
+  try {
+    if (interaction.deferred) await interaction.editReply(content);
+    else if (interaction.replied) await interaction.followUp({ content, flags: MessageFlags.Ephemeral });
+    else await interaction.reply({ content, flags: interaction.inGuild() ? MessageFlags.Ephemeral : undefined });
+  } catch (replyError) {
+    console.error(`[${id}] Could not send the error message:`, replyError);
+  }
+}
+
 client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   await loadState();
-  await migrateLegacyState();
+  if (normalizeStoredState()) await persistState();
   await expirePanels();
 
   const events = await fetchSchedule(true).catch((error) => {
@@ -510,38 +637,48 @@ client.once('clientReady', async () => {
 });
 
 client.on('interactionCreate', async (interaction) => {
-  try {
-    if (interaction.isStringSelectMenu() && interaction.customId === 'pit:events') {
-      const config = configForComponent(interaction);
-      if (!config || interaction.message.id !== config.panelMessageId) return;
-      if (interaction.user.id !== config.ownerUserId) {
-        await interaction.reply({ content: `This setup belongs to <@${config.ownerUserId}>.`, flags: MessageFlags.Ephemeral });
-        return;
-      }
-      if (config.panelExpiredAt) {
-        await interaction.reply({ content: 'This setup panel has expired. Run `/pit setup` to open a new one.', flags: MessageFlags.Ephemeral });
-        return;
-      }
+  if (interaction.isStringSelectMenu() && interaction.customId === 'pit:events') {
+    const config = configForComponent(interaction);
+    if (!config || interaction.message.id !== config.panelMessageId) {
+      await interaction.reply({ content: 'This setup panel is no longer active. Run `/pit setup` or `/pit dm` to create a new one.', flags: MessageFlags.Ephemeral }).catch(() => null);
+      return;
+    }
+    if (interaction.user.id !== config.ownerUserId) {
+      await interaction.reply({ content: `This setup belongs to <@${config.ownerUserId}>.`, flags: MessageFlags.Ephemeral }).catch(() => null);
+      return;
+    }
+    if (config.panelExpiredAt) {
+      await interaction.reply({ content: 'This setup panel has expired. Run `/pit setup` or `/pit dm` to open a new one.', flags: MessageFlags.Ephemeral }).catch(() => null);
+      return;
+    }
 
+    try {
       await interaction.deferUpdate();
       config.selectedEvents = interaction.values.filter((name) => byName.has(name));
       await persistState();
       await interaction.message.edit({ embeds: [panelEmbed(config)], components: panelComponents(config) });
+    } catch (error) {
+      await replyFailure(interaction, error, 'event select menu');
+    }
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('pit:')) {
+    const config = configForComponent(interaction);
+    if (!config || interaction.message.id !== config.panelMessageId) {
+      await interaction.reply({ content: 'This setup panel is no longer active. Run `/pit setup` or `/pit dm` to create a new one.', flags: MessageFlags.Ephemeral }).catch(() => null);
+      return;
+    }
+    if (interaction.user.id !== config.ownerUserId) {
+      await interaction.reply({ content: `This setup belongs to <@${config.ownerUserId}>.`, flags: MessageFlags.Ephemeral }).catch(() => null);
+      return;
+    }
+    if (config.panelExpiredAt) {
+      await interaction.reply({ content: 'This setup panel has expired. Run `/pit setup` or `/pit dm` to open a new one.', flags: MessageFlags.Ephemeral }).catch(() => null);
       return;
     }
 
-    if (interaction.isButton() && interaction.customId.startsWith('pit:')) {
-      const config = configForComponent(interaction);
-      if (!config || interaction.message.id !== config.panelMessageId) return;
-      if (interaction.user.id !== config.ownerUserId) {
-        await interaction.reply({ content: `This setup belongs to <@${config.ownerUserId}>.`, flags: MessageFlags.Ephemeral });
-        return;
-      }
-      if (config.panelExpiredAt) {
-        await interaction.reply({ content: 'This setup panel has expired. Run `/pit setup` to open a new one.', flags: MessageFlags.Ephemeral });
-        return;
-      }
-
+    try {
       await interaction.deferUpdate();
       if (interaction.customId === 'pit:minor') config.selectedEvents = EVENTS.filter((event) => event.type === 'minor').map((event) => event.name);
       else if (interaction.customId === 'pit:major') config.selectedEvents = EVENTS.filter((event) => event.type === 'major').map((event) => event.name);
@@ -557,76 +694,34 @@ client.on('interactionCreate', async (interaction) => {
           config.pausedAt = Date.now();
         }
       }
-
       await persistState();
       await interaction.message.edit({ embeds: [panelEmbed(config)], components: panelComponents(config) });
-      return;
+    } catch (error) {
+      await replyFailure(interaction, error, `button ${interaction.customId}`);
     }
+    return;
+  }
 
-    if (!interaction.isChatInputCommand() || interaction.commandName !== 'pit') return;
+  if (!interaction.isChatInputCommand() || interaction.commandName !== 'pit') return;
+
+  try {
     await acknowledgeCommand(interaction);
-
     const subcommand = interaction.options.getSubcommand();
     const inGuild = interaction.inGuild();
-    if (inGuild && subcommand !== 'upcoming' && !canManage(interaction)) {
-      await interaction.editReply('You need **Manage Server** to change Pit notification settings.');
+
+    if (subcommand === 'help') {
+      await interaction.editReply({ embeds: [helpEmbed()] });
       return;
     }
 
-    const store = inGuild ? state.guilds : state.users;
-    const id = inGuild ? interaction.guildId : interaction.user.id;
-    const bucket = bucketKey(inGuild ? 'guild' : 'dm', id);
-
-    if (subcommand === 'setup') {
-      const previous = store[id];
-      const minutes = interaction.options.getInteger('minutes') ?? previous?.leadMinutes ?? DEFAULT_LEAD;
-      let channel = interaction.channel;
-
-      if (inGuild) {
-        channel = interaction.options.getChannel('channel') ?? interaction.channel;
-        if (!channel?.isTextBased()) {
-          await interaction.editReply('Choose a text-based channel.');
-          return;
-        }
-        const permissions = channel.permissionsFor(interaction.guild.members.me);
-        const needed = [
-          PermissionFlagsBits.ViewChannel,
-          PermissionFlagsBits.SendMessages,
-          PermissionFlagsBits.EmbedLinks,
-          PermissionFlagsBits.ReadMessageHistory,
-        ];
-        if (needed.some((permission) => !permissions?.has(permission))) {
-          await interaction.editReply('I need View Channel, Send Messages, Embed Links, and Read Message History in that channel.');
-          return;
-        }
-      } else if (!channel?.isTextBased()) {
-        await interaction.editReply('This DM channel is unavailable.');
-        return;
-      }
-
-      const previousMessage = previous ? await getPanel(previous) : null;
-      const config = {
-        mode: inGuild ? 'guild' : 'dm',
-        panelChannelId: channel.id,
-        panelMessageId: null,
-        panelCreatedAt: Date.now(),
-        panelExpiredAt: null,
-        notifyChannelId: inGuild ? channel.id : null,
-        leadMinutes: minutes,
-        ownerUserId: interaction.user.id,
-        selectedEvents: selectedNames(previous),
-        paused: previous?.paused ?? false,
-        resumeAt: previous?.resumeAt ?? null,
-      };
-
-      const message = await channel.send({ embeds: [panelEmbed(config)], components: panelComponents(config) });
-      config.panelMessageId = message.id;
-      store[id] = config;
-      delete state.notified[bucket];
-      await persistState();
-      if (previousMessage && previousMessage.id !== message.id) await previousMessage.delete().catch(() => null);
-
-      await interaction.editReply(inGuild ? `Notification panel created in <#${channel.id}>.` : 'DM notification controls are ready.');
+    if (subcommand === 'dm') {
+      const minutes = interaction.options.getInteger('minutes') ?? state.users[interaction.user.id]?.leadMinutes ?? DEFAULT_LEAD;
+      await createDmSetup(interaction.user, minutes);
+      await interaction.editReply(
+        inGuild
+          ? '✅ I sent your personal PitBell setup panel in DM. If you do not see it, check your DM privacy settings.'
+          : '✅ Your personal DM setup panel has been refreshed above.',
+      );
       return;
     }
 
@@ -637,39 +732,72 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    const serverMutation = ['setup', 'minutes', 'pause', 'resume', 'reset'].includes(subcommand);
+    if (inGuild && serverMutation && !canManage(interaction)) {
+      await interaction.editReply('❌ You need **Manage Server** to change this server\'s PitBell notification settings.\n\nFor personal notifications, use `/pit dm`.');
+      return;
+    }
+
+    if (subcommand === 'setup') {
+      const minutes = interaction.options.getInteger('minutes');
+      if (inGuild) {
+        const config = await createServerSetup(interaction, minutes);
+        await interaction.editReply(`✅ Server notification panel created in <#${config.panelChannelId}>. Use the dropdown there to choose events.`);
+      } else {
+        await createDmSetup(interaction.user, minutes);
+        await interaction.editReply('✅ Your personal DM notification panel has been created. Use the dropdown above to choose events.');
+      }
+      return;
+    }
+
+    const { store, id, scope } = currentStoreAndId(interaction);
     const config = store[id];
     if (!config) {
-      await interaction.editReply('Run `/pit setup` first.');
+      await interaction.editReply(
+        inGuild
+          ? 'No server setup exists yet. A server manager can run `/pit setup`. For your own private reminders, run `/pit dm`.'
+          : 'No DM setup exists yet. Run `/pit setup` here to create one.',
+      );
       return;
     }
     config.selectedEvents ??= [];
 
+    if (subcommand === 'status') {
+      const selected = selectedNames(config);
+      const panelState = config.panelExpiredAt ? 'Expired' : 'Active';
+      const text = inGuild
+        ? `Status: **${config.paused ? 'Paused' : 'Active'}**\nPanel: **${panelState}**\nNotifications: <#${config.notifyChannelId}>\nLead time: **${config.leadMinutes ?? DEFAULT_LEAD} min**\nSelected events: **${selected.length}**\nOwner: <@${config.ownerUserId}>\n\nPersonal DM reminders are separate: use \`/pit dm\`.`
+        : `Status: **${config.paused ? 'Paused' : 'Active'}**\nPanel: **${panelState}**\nDelivery: **Direct Message**\nLead time: **${config.leadMinutes ?? DEFAULT_LEAD} min**\nSelected events: **${selected.length}**`;
+      await interaction.editReply(text);
+      return;
+    }
+
     if (subcommand === 'minutes') {
       const value = interaction.options.getInteger('value', true);
       config.leadMinutes = value;
-      delete state.notified[bucket];
+      delete state.notified[bucketKey(scope, id)];
       await persistState();
       await refreshPanel(config);
-      await interaction.editReply(`Notifications will now be sent ${value} minute(s) before events.`);
+      await interaction.editReply(`✅ Notifications will now be sent **${value} minute(s)** before events.`);
       return;
     }
 
     if (subcommand === 'pause') {
       if (config.paused) {
-        await interaction.editReply('Pit event notifications are already paused.');
+        await interaction.editReply('ℹ️ Notifications are already paused. Your event selections are still saved.');
         return;
       }
       config.paused = true;
       config.pausedAt = Date.now();
       await persistState();
       await refreshPanel(config);
-      await interaction.editReply('Notifications are paused. Your settings are still saved.');
+      await interaction.editReply('⏸️ Notifications are paused. Your selected events and reminder time are still saved.');
       return;
     }
 
     if (subcommand === 'resume') {
       if (!config.paused) {
-        await interaction.editReply('Pit event notifications are already active.');
+        await interaction.editReply('ℹ️ Notifications are already active.');
         return;
       }
       config.paused = false;
@@ -677,34 +805,27 @@ client.on('interactionCreate', async (interaction) => {
       delete config.pausedAt;
       await persistState();
       await refreshPanel(config);
-      await interaction.editReply('Notifications are active again. Your previous settings have been kept.');
-      return;
-    }
-
-    if (subcommand === 'status') {
-      const selected = selectedNames(config);
-      const panelState = config.panelExpiredAt ? 'Expired' : 'Active';
-      const text = inGuild
-        ? `Status: **${config.paused ? 'Paused' : 'Active'}**\nPanel: **${panelState}**\nNotifications: <#${config.notifyChannelId}>\nLead time: **${config.leadMinutes ?? DEFAULT_LEAD} min**\nSelected events: **${selected.length}**\nMention: <@${config.ownerUserId}>`
-        : `Status: **${config.paused ? 'Paused' : 'Active'}**\nPanel: **${panelState}**\nDelivery: **Direct Message**\nLead time: **${config.leadMinutes ?? DEFAULT_LEAD} min**\nSelected events: **${selected.length}**\nMention: <@${config.ownerUserId}>`;
-      await interaction.editReply(text);
+      await interaction.editReply('▶️ Notifications are active again. Your previous settings have been kept.');
       return;
     }
 
     if (subcommand === 'reset') {
       const oldPanel = await getPanel(config);
       delete store[id];
-      delete state.notified[bucket];
+      delete state.notified[bucketKey(scope, id)];
       await persistState();
       if (oldPanel) await oldPanel.delete().catch(() => null);
-      await interaction.editReply(inGuild ? 'Pit event notifications have been disabled for this server.' : 'Pit event DM notifications have been disabled for you.');
+      await interaction.editReply(
+        inGuild
+          ? '✅ Server PitBell notifications have been reset. Personal DM settings, if any, were not changed.'
+          : '✅ Your personal PitBell DM notifications have been reset.',
+      );
+      return;
     }
+
+    await interaction.editReply('Unknown subcommand. Run `/pit help` to see available commands.');
   } catch (error) {
-    console.error('Interaction failed:', error);
-    if (interaction.isRepliable()) {
-      if (interaction.deferred || interaction.replied) await interaction.editReply('Something went wrong while handling that interaction.').catch(() => null);
-      else await interaction.reply({ content: 'Something went wrong while handling that interaction.', flags: MessageFlags.Ephemeral }).catch(() => null);
-    }
+    await replyFailure(interaction, error, 'slash command');
   }
 });
 
