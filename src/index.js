@@ -7,6 +7,7 @@ import {
   Client,
   EmbedBuilder,
   GatewayIntentBits,
+  MessageFlags,
   Partials,
   PermissionFlagsBits,
   REST,
@@ -25,6 +26,9 @@ const POLL_MS = 20_000;
 const SOURCE_REFRESH_MS = 60_000;
 const DEFAULT_LEAD = 5;
 const STREAM_URL = process.env.STREAM_URL || 'https://www.twitch.tv/hypixel';
+const PANEL_TIMEOUT_MINUTES = Math.max(1, Number.parseInt(process.env.PANEL_TIMEOUT_MINUTES ?? '15', 10) || 15);
+const PANEL_TIMEOUT_MS = PANEL_TIMEOUT_MINUTES * 60_000;
+const DISCORD_EPOCH = 1420070400000n;
 
 const EVENTS = Object.freeze([
   ['Quick Maths', '🧮', 'minor', 15],
@@ -48,7 +52,7 @@ const EVENTS = Object.freeze([
 ].map(([name, emoji, type, durationSeconds]) => ({ name, emoji, type, durationSeconds })));
 
 const byName = new Map(EVENTS.map((event) => [event.name, event]));
-const norm = (value) => String(value ?? '').replace(/\uFE0F/g, '');
+const normalizeEmoji = (value) => String(value ?? '').replace(/\uFE0F/g, '');
 
 const command = new SlashCommandBuilder()
   .setName('pit')
@@ -57,15 +61,9 @@ const command = new SlashCommandBuilder()
     sub
       .setName('setup')
       .setDescription('Create or replace your event notification setup')
-      .addChannelOption((option) =>
-        option.setName('channel').setDescription('Server channel for the panel and notifications'),
-      )
+      .addChannelOption((option) => option.setName('channel').setDescription('Server channel for the panel and notifications'))
       .addIntegerOption((option) =>
-        option
-          .setName('minutes')
-          .setDescription('Notify this many minutes before an event')
-          .setMinValue(1)
-          .setMaxValue(30),
+        option.setName('minutes').setDescription('Notify this many minutes before an event').setMinValue(1).setMaxValue(30),
       ),
   )
   .addSubcommand((sub) =>
@@ -73,12 +71,7 @@ const command = new SlashCommandBuilder()
       .setName('minutes')
       .setDescription('Change the notification lead time')
       .addIntegerOption((option) =>
-        option
-          .setName('value')
-          .setDescription('Minutes before the event')
-          .setMinValue(1)
-          .setMaxValue(30)
-          .setRequired(true),
+        option.setName('value').setDescription('Minutes before the event').setMinValue(1).setMaxValue(30).setRequired(true),
       ),
   )
   .addSubcommand((sub) => sub.setName('pause').setDescription('Pause notifications without deleting your settings'))
@@ -88,9 +81,7 @@ const command = new SlashCommandBuilder()
     sub
       .setName('upcoming')
       .setDescription('Show upcoming Pit events')
-      .addIntegerOption((option) =>
-        option.setName('count').setDescription('Number of events to show').setMinValue(1).setMaxValue(15),
-      ),
+      .addIntegerOption((option) => option.setName('count').setDescription('Number of events to show').setMinValue(1).setMaxValue(15)),
   )
   .addSubcommand((sub) => sub.setName('reset').setDescription('Remove the current configuration and stop notifications'));
 
@@ -109,14 +100,22 @@ const client = new Client({
 });
 
 let state = { guilds: {}, users: {}, notified: {} };
-let cache = { fetchedAt: 0, events: [] };
-let lastPresence = '';
-let polling = false;
+let scheduleCache = { fetchedAt: 0, events: [] };
+let lastPresenceKey = '';
+let pollRunning = false;
 let saveQueue = Promise.resolve();
 
 const bucketKey = (scope, id) => `${scope}:${id}`;
 const eventKey = (event) => `${event.timestamp}:${event.event}`;
-const unix = (ms) => Math.floor(ms / 1000);
+const toUnix = (ms) => Math.floor(ms / 1000);
+
+function snowflakeTimestamp(id) {
+  try {
+    return Number((BigInt(id) >> 22n) + DISCORD_EPOCH);
+  } catch {
+    return null;
+  }
+}
 
 function selectedNames(config) {
   return Array.isArray(config?.selectedEvents) ? config.selectedEvents.filter((name) => byName.has(name)) : [];
@@ -139,17 +138,33 @@ function panelEmbed(config) {
       { name: 'Reminder', value: `${config.leadMinutes ?? DEFAULT_LEAD} minute(s) before`, inline: true },
       { name: 'Status', value: config.paused ? '⏸️ Paused' : '🟢 Active', inline: true },
     )
-    .setFooter({ text: 'Schedule source: brookeafk.com event data' })
+    .setFooter({ text: `Controls expire after ${PANEL_TIMEOUT_MINUTES} minutes · Schedule source: brookeafk.com` })
+    .setTimestamp();
+}
+
+function expiredPanelEmbed(config) {
+  const selected = selectedNames(config);
+  return new EmbedBuilder()
+    .setTitle('Hypixel Pit Event Notifications')
+    .setDescription(
+      '⌛ **This setup panel has expired.**\n\n' +
+        'Your selected events, reminder time, and notification state are still saved. Run `/pit setup` to open a fresh control panel.',
+    )
+    .addFields(
+      { name: 'Selected Events', value: selected.length ? `${selected.length} selected` : 'None', inline: true },
+      { name: 'Reminder', value: `${config.leadMinutes ?? DEFAULT_LEAD} min before`, inline: true },
+      { name: 'Status', value: config.paused ? '⏸️ Paused' : '🟢 Active', inline: true },
+    )
+    .setFooter({ text: `Panel expired after ${PANEL_TIMEOUT_MINUTES} minutes` })
     .setTimestamp();
 }
 
 function panelComponents(config) {
   const selected = new Set(selectedNames(config));
-
   const menu = new StringSelectMenuBuilder()
     .setCustomId('pit:events')
     .setPlaceholder(selected.size ? `${selected.size} event(s) selected` : 'Choose Pit events')
-    .setMinValues(1)
+    .setMinValues(0)
     .setMaxValues(EVENTS.length)
     .addOptions(
       EVENTS.map((event) => ({
@@ -161,7 +176,7 @@ function panelComponents(config) {
       })),
     );
 
-  const quickButtons = new ActionRowBuilder().addComponents(
+  const buttons = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('pit:minor').setLabel('Minor').setEmoji('🔹').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('pit:major').setLabel('Major').setEmoji('🔸').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('pit:all').setLabel('All').setEmoji('✅').setStyle(ButtonStyle.Secondary),
@@ -173,13 +188,12 @@ function panelComponents(config) {
       .setStyle(config.paused ? ButtonStyle.Success : ButtonStyle.Secondary),
   );
 
-  return [new ActionRowBuilder().addComponents(menu), quickButtons];
+  return [new ActionRowBuilder().addComponents(menu), buttons];
 }
 
 function notificationEmbed(event, minutes) {
   const meta = byName.get(event.event);
-  const starts = unix(event.timestamp);
-
+  const starts = toUnix(event.timestamp);
   return new EmbedBuilder()
     .setTitle(`${meta?.emoji ?? '🔔'} ${event.event}`)
     .setDescription(`A **${event.type.toUpperCase()}** event is starting soon.`)
@@ -195,7 +209,7 @@ function upcomingEmbed(events) {
   const body = events
     .map((event) => {
       const meta = byName.get(event.event);
-      return `${meta?.emoji ?? '•'} **${event.event}** · ${event.type === 'major' ? 'Major' : 'Minor'} · <t:${unix(event.timestamp)}:R>`;
+      return `${meta?.emoji ?? '•'} **${event.event}** · ${event.type === 'major' ? 'Major' : 'Minor'} · <t:${toUnix(event.timestamp)}:R>`;
     })
     .join('\n');
 
@@ -218,7 +232,6 @@ function currentEvent(schedule, now = Date.now()) {
 
 function updatePresence(schedule) {
   if (!client.user) return;
-
   const now = Date.now();
   const current = currentEvent(schedule, now);
   let key;
@@ -241,54 +254,43 @@ function updatePresence(schedule) {
     }
   }
 
-  if (key === lastPresence) return;
-
-  client.user.setPresence({
-    status: 'online',
-    activities: [{ name, type: ActivityType.Streaming, url: STREAM_URL }],
-  });
-  lastPresence = key;
+  if (key === lastPresenceKey) return;
+  client.user.setPresence({ status: 'online', activities: [{ name, type: ActivityType.Streaming, url: STREAM_URL }] });
+  lastPresenceKey = key;
 }
 
 async function loadState() {
   try {
     const parsed = JSON.parse(await fs.readFile(STATE_FILE, 'utf8'));
-    state = {
-      guilds: parsed.guilds ?? {},
-      users: parsed.users ?? {},
-      notified: parsed.notified ?? {},
-    };
+    state = { guilds: parsed.guilds ?? {}, users: parsed.users ?? {}, notified: parsed.notified ?? {} };
   } catch (error) {
     if (error.code !== 'ENOENT') console.warn('Could not read state file:', error);
-    await persist();
+    await persistState();
   }
 }
 
-function persist() {
+function persistState() {
   saveQueue = saveQueue
     .then(async () => {
       await fs.mkdir(path.dirname(STATE_FILE), { recursive: true });
       const temp = `${STATE_FILE}.tmp`;
-      await fs.writeFile(temp, `${JSON.stringify(state, null, 2)}\n`);
+      await fs.writeFile(temp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
       await fs.rename(temp, STATE_FILE);
     })
     .catch((error) => console.error('Failed to persist state:', error));
-
   return saveQueue;
 }
 
-async function schedule(force = false) {
+async function fetchSchedule(force = false) {
   const now = Date.now();
-  if (!force && cache.events.length && now - cache.fetchedAt < SOURCE_REFRESH_MS) return cache.events;
+  if (!force && scheduleCache.events.length && now - scheduleCache.fetchedAt < SOURCE_REFRESH_MS) return scheduleCache.events;
 
   try {
     const response = await fetch(`${SOURCE_URL}?t=${now}`, {
-      headers: { 'User-Agent': 'pit-event-notifier/1.3', 'Cache-Control': 'no-cache' },
+      headers: { 'User-Agent': 'pit-event-notifier/1.5', 'Cache-Control': 'no-cache' },
       signal: AbortSignal.timeout(10_000),
     });
-
     if (!response.ok) throw new Error(`Schedule source returned HTTP ${response.status}`);
-
     const data = await response.json();
     if (!Array.isArray(data)) throw new Error('Schedule source did not return an array');
 
@@ -303,37 +305,106 @@ async function schedule(force = false) {
       )
       .sort((a, b) => a.timestamp - b.timestamp);
 
-    cache = { fetchedAt: now, events };
+    scheduleCache = { fetchedAt: now, events };
     return events;
   } catch (error) {
-    if (cache.events.length) {
+    if (scheduleCache.events.length) {
       console.warn('Using cached schedule:', error.message);
-      return cache.events;
+      return scheduleCache.events;
     }
     throw error;
   }
 }
 
-async function panel(config) {
+async function getPanel(config) {
+  if (!config?.panelMessageId || !config?.panelChannelId) return null;
   let channel = await client.channels.fetch(config.panelChannelId).catch(() => null);
-
   if (!channel && config.mode === 'dm') {
     const user = await client.users.fetch(config.ownerUserId).catch(() => null);
     channel = await user?.createDM().catch(() => null);
   }
-
   if (!channel?.isTextBased()) return null;
   return channel.messages.fetch(config.panelMessageId).catch(() => null);
 }
 
-function selected(config, eventName) {
-  return selectedNames(config).includes(eventName);
+async function refreshPanel(config, message = null) {
+  if (config.panelExpiredAt) return;
+  const target = message ?? (await getPanel(config));
+  if (!target) return;
+  await target.edit({ embeds: [panelEmbed(config)], components: panelComponents(config) });
 }
 
-async function notify(scope, config, event) {
-  if (!selected(config, event.event)) return true;
+async function expirePanel(config) {
+  if (!config?.panelMessageId || config.panelExpiredAt) return false;
+  const createdAt = config.panelCreatedAt ?? snowflakeTimestamp(config.panelMessageId);
+  if (!createdAt || Date.now() - createdAt < PANEL_TIMEOUT_MS) return false;
 
+  const message = await getPanel(config);
+  if (message) {
+    await message.edit({ embeds: [expiredPanelEmbed(config)], components: [] }).catch((error) =>
+      console.warn(`Could not expire panel ${config.panelMessageId}:`, error.message),
+    );
+  }
+
+  config.panelExpiredAt = Date.now();
+  return true;
+}
+
+async function expirePanels() {
+  let dirty = false;
+  for (const config of Object.values(state.guilds)) dirty = (await expirePanel(config)) || dirty;
+  for (const config of Object.values(state.users)) dirty = (await expirePanel(config)) || dirty;
+  if (dirty) await persistState();
+}
+
+async function migrateLegacyConfig(scope, id, config) {
+  if (Array.isArray(config.selectedEvents)) return false;
+  const oldPanel = await getPanel(config);
+  const selectedEvents = [];
+  const reactionCache = oldPanel?.reactions?.cache;
+
+  if (reactionCache) {
+    for (const event of EVENTS) {
+      const reaction = reactionCache.find((item) => normalizeEmoji(item.emoji.name) === normalizeEmoji(event.emoji));
+      if (!reaction) continue;
+      const users = await reaction.users.fetch().catch(() => null);
+      if (users?.has(config.ownerUserId)) selectedEvents.push(event.name);
+    }
+  }
+
+  config.selectedEvents = selectedEvents;
+  config.panelCreatedAt ??= config.panelMessageId ? snowflakeTimestamp(config.panelMessageId) : Date.now();
+  console.log(`Migrated ${scope} ${id} from reactions (${selectedEvents.length} selections)`);
+  return true;
+}
+
+async function migrateLegacyState() {
+  let dirty = false;
+  for (const [id, config] of Object.entries(state.guilds)) {
+    try {
+      dirty = (await migrateLegacyConfig('guild', id, config)) || dirty;
+    } catch (error) {
+      console.warn(`Could not migrate legacy guild ${id}:`, error.message);
+      config.selectedEvents ??= [];
+      dirty = true;
+    }
+  }
+  for (const [id, config] of Object.entries(state.users)) {
+    try {
+      dirty = (await migrateLegacyConfig('dm', id, config)) || dirty;
+    } catch (error) {
+      console.warn(`Could not migrate legacy DM ${id}:`, error.message);
+      config.selectedEvents ??= [];
+      dirty = true;
+    }
+  }
+  if (dirty) await persistState();
+}
+
+async function sendNotification(scope, config, event) {
+  if (!selectedNames(config).includes(event.event)) return true;
   let channel;
+
   if (scope === 'guild') {
     channel = await client.channels.fetch(config.notifyChannelId).catch(() => null);
   } else {
@@ -342,7 +413,6 @@ async function notify(scope, config, event) {
   }
 
   if (!channel?.isTextBased()) return false;
-
   await channel.send({
     content: `<@${config.ownerUserId}>`,
     embeds: [notificationEmbed(event, config.leadMinutes ?? DEFAULT_LEAD)],
@@ -353,7 +423,6 @@ async function notify(scope, config, event) {
 
 async function processTarget(scope, id, config, events, now) {
   if (config.paused) return false;
-
   const lead = (config.leadMinutes ?? DEFAULT_LEAD) * 60_000;
   const bucket = bucketKey(scope, id);
   let dirty = false;
@@ -369,7 +438,7 @@ async function processTarget(scope, id, config, events, now) {
     if (state.notified[bucket][key]) continue;
 
     try {
-      if (await notify(scope, config, event)) {
+      if (await sendNotification(scope, config, event)) {
         state.notified[bucket][key] = now;
         dirty = true;
       }
@@ -377,45 +446,38 @@ async function processTarget(scope, id, config, events, now) {
       console.error(`Failed to notify ${scope} ${id} about ${key}:`, error);
     }
   }
-
   return dirty;
 }
 
-function prune() {
+function pruneNotified() {
   const cutoff = Date.now() - 86_400_000;
   for (const [bucket, entries] of Object.entries(state.notified)) {
-    for (const [key, sentAt] of Object.entries(entries)) {
-      if (sentAt < cutoff) delete entries[key];
-    }
+    for (const [key, sentAt] of Object.entries(entries)) if (sentAt < cutoff) delete entries[key];
     if (!Object.keys(entries).length) delete state.notified[bucket];
   }
 }
 
 async function poll() {
-  if (polling) return;
-  polling = true;
-
+  if (pollRunning) return;
+  pollRunning = true;
   try {
     const now = Date.now();
-    const events = await schedule();
+    const events = await fetchSchedule();
     updatePresence(events);
     let dirty = false;
 
-    for (const [id, config] of Object.entries(state.guilds)) {
-      dirty = (await processTarget('guild', id, config, events, now)) || dirty;
-    }
-    for (const [id, config] of Object.entries(state.users)) {
-      dirty = (await processTarget('dm', id, config, events, now)) || dirty;
-    }
+    for (const [id, config] of Object.entries(state.guilds)) dirty = (await processTarget('guild', id, config, events, now)) || dirty;
+    for (const [id, config] of Object.entries(state.users)) dirty = (await processTarget('dm', id, config, events, now)) || dirty;
 
     const before = JSON.stringify(state.notified);
-    prune();
+    pruneNotified();
     if (before !== JSON.stringify(state.notified)) dirty = true;
-    if (dirty) await persist();
+    if (dirty) await persistState();
+    await expirePanels();
   } catch (error) {
     console.error('Notification poll failed:', error);
   } finally {
-    polling = false;
+    pollRunning = false;
   }
 }
 
@@ -423,174 +485,109 @@ function canManage(interaction) {
   return interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ?? false;
 }
 
-function findComponentConfig(interaction) {
-  if (interaction.inGuild()) {
-    return { config: state.guilds[interaction.guildId] };
-  }
-  return { config: state.users[interaction.user.id] };
+function configForComponent(interaction) {
+  return interaction.inGuild() ? state.guilds[interaction.guildId] : state.users[interaction.user.id];
 }
 
-async function refreshPanelMessage(config, message = null) {
-  const target = message ?? (await panel(config));
-  if (!target) return;
-  await target.edit({ embeds: [panelEmbed(config)], components: panelComponents(config) });
-}
-
-async function migrateLegacyConfig(scope, id, config) {
-  if (Array.isArray(config.selectedEvents)) return false;
-
-  const oldPanel = await panel(config);
-  const selectedEvents = [];
-  const reactionCache = oldPanel?.reactions?.cache;
-
-  if (reactionCache) {
-    for (const event of EVENTS) {
-      const reaction = reactionCache.find((item) => norm(item.emoji.name) === norm(event.emoji));
-      if (!reaction) continue;
-      const users = await reaction.users.fetch().catch(() => null);
-      if (users?.has(config.ownerUserId)) selectedEvents.push(event.name);
-    }
-  }
-
-  config.selectedEvents = selectedEvents;
-
-  if (oldPanel?.channel?.isTextBased()) {
-    try {
-      const newPanel = await oldPanel.channel.send({
-        embeds: [panelEmbed(config)],
-        components: panelComponents(config),
-      });
-      config.panelMessageId = newPanel.id;
-      config.panelChannelId = newPanel.channel.id;
-      await oldPanel.delete().catch(() => null);
-    } catch (error) {
-      console.warn(`Could not replace legacy panel for ${scope} ${id}:`, error.message);
-    }
-  }
-
-  console.log(`Migrated ${scope} ${id} from reactions to components (${selectedEvents.length} selections)`);
-  return true;
-}
-
-async function migrateLegacyPanels() {
-  let dirty = false;
-
-  for (const [id, config] of Object.entries(state.guilds)) {
-    try {
-      dirty = (await migrateLegacyConfig('guild', id, config)) || dirty;
-    } catch (error) {
-      console.warn(`Could not migrate legacy guild ${id}:`, error.message);
-      if (!Array.isArray(config.selectedEvents)) {
-        config.selectedEvents = [];
-        dirty = true;
-      }
-    }
-  }
-  for (const [id, config] of Object.entries(state.users)) {
-    try {
-      dirty = (await migrateLegacyConfig('dm', id, config)) || dirty;
-    } catch (error) {
-      console.warn(`Could not migrate legacy DM ${id}:`, error.message);
-      if (!Array.isArray(config.selectedEvents)) {
-        config.selectedEvents = [];
-        dirty = true;
-      }
-    }
-  }
-
-  if (dirty) await persist();
+async function acknowledgeCommand(interaction) {
+  if (interaction.inGuild()) await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  else await interaction.deferReply();
 }
 
 client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   await loadState();
-  await migrateLegacyPanels();
+  await migrateLegacyState();
+  await expirePanels();
 
-  const events = await schedule(true).catch((error) => {
+  const events = await fetchSchedule(true).catch((error) => {
     console.warn('Initial schedule fetch failed:', error.message);
     return [];
   });
-
   updatePresence(events);
   await poll();
   setInterval(poll, POLL_MS);
 });
 
 client.on('interactionCreate', async (interaction) => {
-  if (interaction.isStringSelectMenu() && interaction.customId === 'pit:events') {
-    const { config } = findComponentConfig(interaction);
-    if (!config || interaction.message.id !== config.panelMessageId) return;
-
-    if (interaction.user.id !== config.ownerUserId) {
-      await interaction.reply({ content: `This setup belongs to <@${config.ownerUserId}>.`, ephemeral: true });
-      return;
-    }
-
-    config.selectedEvents = interaction.values.filter((name) => byName.has(name));
-    await persist();
-    await interaction.update({ embeds: [panelEmbed(config)], components: panelComponents(config) });
-    return;
-  }
-
-  if (interaction.isButton() && interaction.customId.startsWith('pit:')) {
-    const { config } = findComponentConfig(interaction);
-    if (!config || interaction.message.id !== config.panelMessageId) return;
-
-    if (interaction.user.id !== config.ownerUserId) {
-      await interaction.reply({ content: `This setup belongs to <@${config.ownerUserId}>.`, ephemeral: true });
-      return;
-    }
-
-    if (interaction.customId === 'pit:minor') {
-      config.selectedEvents = EVENTS.filter((event) => event.type === 'minor').map((event) => event.name);
-    } else if (interaction.customId === 'pit:major') {
-      config.selectedEvents = EVENTS.filter((event) => event.type === 'major').map((event) => event.name);
-    } else if (interaction.customId === 'pit:all') {
-      config.selectedEvents = EVENTS.map((event) => event.name);
-    } else if (interaction.customId === 'pit:clear') {
-      config.selectedEvents = [];
-    } else if (interaction.customId === 'pit:toggle') {
-      if (config.paused) {
-        config.paused = false;
-        config.resumeAt = Date.now();
-        delete config.pausedAt;
-      } else {
-        config.paused = true;
-        config.pausedAt = Date.now();
-      }
-    }
-
-    await persist();
-    await interaction.update({ embeds: [panelEmbed(config)], components: panelComponents(config) });
-    return;
-  }
-
-  if (!interaction.isChatInputCommand() || interaction.commandName !== 'pit') return;
-
-  const subcommand = interaction.options.getSubcommand();
-  const inGuild = interaction.inGuild();
-
-  if (inGuild && subcommand !== 'upcoming' && !canManage(interaction)) {
-    await interaction.reply({ content: 'You need **Manage Server** to change Pit notification settings.', ephemeral: true });
-    return;
-  }
-
-  const store = inGuild ? state.guilds : state.users;
-  const id = inGuild ? interaction.guildId : interaction.user.id;
-  const bucket = bucketKey(inGuild ? 'guild' : 'dm', id);
-
   try {
+    if (interaction.isStringSelectMenu() && interaction.customId === 'pit:events') {
+      const config = configForComponent(interaction);
+      if (!config || interaction.message.id !== config.panelMessageId) return;
+      if (interaction.user.id !== config.ownerUserId) {
+        await interaction.reply({ content: `This setup belongs to <@${config.ownerUserId}>.`, flags: MessageFlags.Ephemeral });
+        return;
+      }
+      if (config.panelExpiredAt) {
+        await interaction.reply({ content: 'This setup panel has expired. Run `/pit setup` to open a new one.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      await interaction.deferUpdate();
+      config.selectedEvents = interaction.values.filter((name) => byName.has(name));
+      await persistState();
+      await interaction.message.edit({ embeds: [panelEmbed(config)], components: panelComponents(config) });
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith('pit:')) {
+      const config = configForComponent(interaction);
+      if (!config || interaction.message.id !== config.panelMessageId) return;
+      if (interaction.user.id !== config.ownerUserId) {
+        await interaction.reply({ content: `This setup belongs to <@${config.ownerUserId}>.`, flags: MessageFlags.Ephemeral });
+        return;
+      }
+      if (config.panelExpiredAt) {
+        await interaction.reply({ content: 'This setup panel has expired. Run `/pit setup` to open a new one.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      await interaction.deferUpdate();
+      if (interaction.customId === 'pit:minor') config.selectedEvents = EVENTS.filter((event) => event.type === 'minor').map((event) => event.name);
+      else if (interaction.customId === 'pit:major') config.selectedEvents = EVENTS.filter((event) => event.type === 'major').map((event) => event.name);
+      else if (interaction.customId === 'pit:all') config.selectedEvents = EVENTS.map((event) => event.name);
+      else if (interaction.customId === 'pit:clear') config.selectedEvents = [];
+      else if (interaction.customId === 'pit:toggle') {
+        if (config.paused) {
+          config.paused = false;
+          config.resumeAt = Date.now();
+          delete config.pausedAt;
+        } else {
+          config.paused = true;
+          config.pausedAt = Date.now();
+        }
+      }
+
+      await persistState();
+      await interaction.message.edit({ embeds: [panelEmbed(config)], components: panelComponents(config) });
+      return;
+    }
+
+    if (!interaction.isChatInputCommand() || interaction.commandName !== 'pit') return;
+    await acknowledgeCommand(interaction);
+
+    const subcommand = interaction.options.getSubcommand();
+    const inGuild = interaction.inGuild();
+    if (inGuild && subcommand !== 'upcoming' && !canManage(interaction)) {
+      await interaction.editReply('You need **Manage Server** to change Pit notification settings.');
+      return;
+    }
+
+    const store = inGuild ? state.guilds : state.users;
+    const id = inGuild ? interaction.guildId : interaction.user.id;
+    const bucket = bucketKey(inGuild ? 'guild' : 'dm', id);
+
     if (subcommand === 'setup') {
-      const minutes = interaction.options.getInteger('minutes') ?? DEFAULT_LEAD;
+      const previous = store[id];
+      const minutes = interaction.options.getInteger('minutes') ?? previous?.leadMinutes ?? DEFAULT_LEAD;
       let channel = interaction.channel;
 
       if (inGuild) {
         channel = interaction.options.getChannel('channel') ?? interaction.channel;
         if (!channel?.isTextBased()) {
-          await interaction.reply({ content: 'Choose a text-based channel.', ephemeral: true });
+          await interaction.editReply('Choose a text-based channel.');
           return;
         }
-
         const permissions = channel.permissionsFor(interaction.guild.members.me);
         const needed = [
           PermissionFlagsBits.ViewChannel,
@@ -598,143 +595,116 @@ client.on('interactionCreate', async (interaction) => {
           PermissionFlagsBits.EmbedLinks,
           PermissionFlagsBits.ReadMessageHistory,
         ];
-
         if (needed.some((permission) => !permissions?.has(permission))) {
-          await interaction.reply({
-            content: 'I need View Channel, Send Messages, Embed Links, and Read Message History in that channel.',
-            ephemeral: true,
-          });
+          await interaction.editReply('I need View Channel, Send Messages, Embed Links, and Read Message History in that channel.');
           return;
         }
       } else if (!channel?.isTextBased()) {
-        await interaction.reply('This DM channel is unavailable.');
+        await interaction.editReply('This DM channel is unavailable.');
         return;
       }
 
-      await interaction.deferReply({ ephemeral: inGuild });
-
-      if (store[id]?.panelMessageId) {
-        await (await panel(store[id]))?.delete().catch(() => null);
-      }
-
+      const previousMessage = previous ? await getPanel(previous) : null;
       const config = {
         mode: inGuild ? 'guild' : 'dm',
         panelChannelId: channel.id,
         panelMessageId: null,
+        panelCreatedAt: Date.now(),
+        panelExpiredAt: null,
         notifyChannelId: inGuild ? channel.id : null,
         leadMinutes: minutes,
         ownerUserId: interaction.user.id,
-        selectedEvents: [],
-        paused: false,
-        resumeAt: null,
+        selectedEvents: selectedNames(previous),
+        paused: previous?.paused ?? false,
+        resumeAt: previous?.resumeAt ?? null,
       };
 
-      const message = await channel.send({
-        embeds: [panelEmbed(config)],
-        components: panelComponents(config),
-      });
-
+      const message = await channel.send({ embeds: [panelEmbed(config)], components: panelComponents(config) });
       config.panelMessageId = message.id;
       store[id] = config;
       delete state.notified[bucket];
-      await persist();
+      await persistState();
+      if (previousMessage && previousMessage.id !== message.id) await previousMessage.delete().catch(() => null);
 
-      await interaction.editReply(
-        inGuild
-          ? `Notification panel created in <#${channel.id}>.`
-          : 'DM notifications are configured. Choose your events from the dropdown above.',
-      );
+      await interaction.editReply(inGuild ? `Notification panel created in <#${channel.id}>.` : 'DM notification controls are ready.');
       return;
     }
 
     if (subcommand === 'upcoming') {
       const count = interaction.options.getInteger('count') ?? 10;
-      await interaction.deferReply({ ephemeral: inGuild });
-      const events = (await schedule(true)).filter((event) => event.timestamp > Date.now() - 30_000).slice(0, count);
+      const events = (await fetchSchedule(true)).filter((event) => event.timestamp > Date.now() - 30_000).slice(0, count);
       await interaction.editReply({ embeds: [upcomingEmbed(events)] });
       return;
     }
 
     const config = store[id];
     if (!config) {
-      await interaction.reply({ content: 'Run `/pit setup` first.', ephemeral: inGuild });
+      await interaction.editReply('Run `/pit setup` first.');
       return;
     }
-
-    if (!Array.isArray(config.selectedEvents)) config.selectedEvents = [];
+    config.selectedEvents ??= [];
 
     if (subcommand === 'minutes') {
       const value = interaction.options.getInteger('value', true);
       config.leadMinutes = value;
       delete state.notified[bucket];
-      await persist();
-      await refreshPanelMessage(config);
-      await interaction.reply({
-        content: `Notifications will now be sent ${value} minute(s) before events.`,
-        ephemeral: inGuild,
-      });
+      await persistState();
+      await refreshPanel(config);
+      await interaction.editReply(`Notifications will now be sent ${value} minute(s) before events.`);
       return;
     }
 
     if (subcommand === 'pause') {
       if (config.paused) {
-        await interaction.reply({ content: 'Pit event notifications are already paused.', ephemeral: inGuild });
+        await interaction.editReply('Pit event notifications are already paused.');
         return;
       }
-
       config.paused = true;
       config.pausedAt = Date.now();
-      await persist();
-      await refreshPanelMessage(config);
-      await interaction.reply({ content: 'Notifications are paused. Your settings are still saved.', ephemeral: inGuild });
+      await persistState();
+      await refreshPanel(config);
+      await interaction.editReply('Notifications are paused. Your settings are still saved.');
       return;
     }
 
     if (subcommand === 'resume') {
       if (!config.paused) {
-        await interaction.reply({ content: 'Pit event notifications are already active.', ephemeral: inGuild });
+        await interaction.editReply('Pit event notifications are already active.');
         return;
       }
-
       config.paused = false;
       config.resumeAt = Date.now();
       delete config.pausedAt;
-      await persist();
-      await refreshPanelMessage(config);
-      await interaction.reply({
-        content: 'Notifications are active again. Your previous settings have been kept.',
-        ephemeral: inGuild,
-      });
+      await persistState();
+      await refreshPanel(config);
+      await interaction.editReply('Notifications are active again. Your previous settings have been kept.');
       return;
     }
 
     if (subcommand === 'status') {
       const selected = selectedNames(config);
+      const panelState = config.panelExpiredAt ? 'Expired' : 'Active';
       const text = inGuild
-        ? `Status: **${config.paused ? 'Paused' : 'Active'}**\nPanel: <#${config.panelChannelId}>\nNotifications: <#${config.notifyChannelId}>\nLead time: **${config.leadMinutes ?? DEFAULT_LEAD} min**\nSelected events: **${selected.length}**\nMention: <@${config.ownerUserId}>`
-        : `Status: **${config.paused ? 'Paused' : 'Active'}**\nDelivery: **Direct Message**\nLead time: **${config.leadMinutes ?? DEFAULT_LEAD} min**\nSelected events: **${selected.length}**\nMention: <@${config.ownerUserId}>`;
-
-      await interaction.reply({ content: text, ephemeral: inGuild });
+        ? `Status: **${config.paused ? 'Paused' : 'Active'}**\nPanel: **${panelState}**\nNotifications: <#${config.notifyChannelId}>\nLead time: **${config.leadMinutes ?? DEFAULT_LEAD} min**\nSelected events: **${selected.length}**\nMention: <@${config.ownerUserId}>`
+        : `Status: **${config.paused ? 'Paused' : 'Active'}**\nPanel: **${panelState}**\nDelivery: **Direct Message**\nLead time: **${config.leadMinutes ?? DEFAULT_LEAD} min**\nSelected events: **${selected.length}**\nMention: <@${config.ownerUserId}>`;
+      await interaction.editReply(text);
       return;
     }
 
     if (subcommand === 'reset') {
-      await (await panel(config))?.delete().catch(() => null);
+      const oldPanel = await getPanel(config);
       delete store[id];
       delete state.notified[bucket];
-      await persist();
-      await interaction.reply({
-        content: inGuild
-          ? 'Pit event notifications have been disabled for this server.'
-          : 'Pit event DM notifications have been disabled for you.',
-        ephemeral: inGuild,
-      });
+      await persistState();
+      if (oldPanel) await oldPanel.delete().catch(() => null);
+      await interaction.editReply(inGuild ? 'Pit event notifications have been disabled for this server.' : 'Pit event DM notifications have been disabled for you.');
     }
   } catch (error) {
     console.error('Interaction failed:', error);
-    const payload = { content: 'Something went wrong while handling that interaction.', ephemeral: inGuild };
-    if (interaction.deferred || interaction.replied) await interaction.editReply(payload).catch(() => null);
-    else await interaction.reply(payload).catch(() => null);
+    if (interaction.isRepliable()) {
+      if (interaction.deferred || interaction.replied) await interaction.editReply('Something went wrong while handling that interaction.').catch(() => null);
+      else await interaction.reply({ content: 'Something went wrong while handling that interaction.', flags: MessageFlags.Ephemeral }).catch(() => null);
+    }
   }
 });
 
