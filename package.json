@@ -1,0 +1,19 @@
+{
+  "name": "pit-event-notifier",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Discord bot that notifies users about selected Hypixel Pit events from brookeafk.com data.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node --check src/index.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0",
+    "dotenv": "^18.0.9"
+  }
+}
