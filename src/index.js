@@ -13,11 +13,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const ROOT = path.resolve(__dirname, '..');
-const STATE_FILE = path.join(ROOT, 'data', 'state.json');
-
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const STATE_FILE = path.resolve(__dirname, '../data/state.json');
 const SOURCE_URL = 'https://raw.githubusercontent.com/BrookeAFK/brookeafk-api/main/events.js';
 const POLL_MS = 20_000;
 const SOURCE_REFRESH_MS = 60_000;
@@ -47,68 +44,57 @@ const EVENTS = Object.freeze([
 const EVENT_BY_NAME = new Map(EVENTS.map((event) => [event.name, event]));
 const EVENT_BY_EMOJI = new Map(EVENTS.map((event) => [normalizeEmoji(event.emoji), event]));
 
-const commands = [
-  new SlashCommandBuilder()
-    .setName('pit')
-    .setDescription('Hypixel Pit event notifications')
-    .addSubcommand((sub) =>
-      sub
-        .setName('setup')
-        .setDescription('Create or replace the event subscription panel')
-        .addChannelOption((option) =>
-          option
-            .setName('channel')
-            .setDescription('Channel for the panel and event notifications')
-            .setRequired(true),
-        )
-        .addIntegerOption((option) =>
-          option
-            .setName('minutes')
-            .setDescription('Notify this many minutes before an event')
-            .setMinValue(1)
-            .setMaxValue(30)
-            .setRequired(false),
-        ),
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName('minutes')
-        .setDescription('Change how many minutes before an event notifications are sent')
-        .addIntegerOption((option) =>
-          option
-            .setName('value')
-            .setDescription('Minutes before the event')
-            .setMinValue(1)
-            .setMaxValue(30)
-            .setRequired(true),
-        ),
-    )
-    .addSubcommand((sub) =>
-      sub.setName('status').setDescription('Show the current notification configuration'),
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName('upcoming')
-        .setDescription('Show the next upcoming Pit events')
-        .addIntegerOption((option) =>
-          option
-            .setName('count')
-            .setDescription('Number of events to show')
-            .setMinValue(1)
-            .setMaxValue(15)
-            .setRequired(false),
-        ),
-    )
-    .addSubcommand((sub) =>
-      sub.setName('reset').setDescription('Remove this server configuration and stop notifications'),
-    )
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
-].map((command) => command.toJSON());
+const command = new SlashCommandBuilder()
+  .setName('pit')
+  .setDescription('Hypixel Pit event notifications')
+  .addSubcommand((sub) =>
+    sub
+      .setName('setup')
+      .setDescription('Create or replace your event notification setup')
+      .addChannelOption((option) =>
+        option
+          .setName('channel')
+          .setDescription('Server channel for the panel and notifications')
+          .setRequired(false),
+      )
+      .addIntegerOption((option) =>
+        option
+          .setName('minutes')
+          .setDescription('Notify this many minutes before an event')
+          .setMinValue(1)
+          .setMaxValue(30)
+          .setRequired(false),
+      ),
+  )
+  .addSubcommand((sub) =>
+    sub
+      .setName('minutes')
+      .setDescription('Change the notification lead time')
+      .addIntegerOption((option) =>
+        option.setName('value').setDescription('Minutes before the event').setMinValue(1).setMaxValue(30).setRequired(true),
+      ),
+  )
+  .addSubcommand((sub) => sub.setName('pause').setDescription('Pause notifications without deleting your settings'))
+  .addSubcommand((sub) => sub.setName('resume').setDescription('Resume notifications with your saved settings'))
+  .addSubcommand((sub) => sub.setName('status').setDescription('Show the current notification configuration'))
+  .addSubcommand((sub) =>
+    sub
+      .setName('upcoming')
+      .setDescription('Show upcoming Pit events')
+      .addIntegerOption((option) =>
+        option.setName('count').setDescription('Number of events to show').setMinValue(1).setMaxValue(15).setRequired(false),
+      ),
+  )
+  .addSubcommand((sub) => sub.setName('reset').setDescription('Remove the current configuration and stop notifications'));
+
+const commandJson = {
+  ...command.toJSON(),
+  integration_types: [0], // Guild Install
+  contexts: [0, 1], // Guild + Bot DM
+};
 
 const token = process.env.DISCORD_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
-const devGuildId = process.env.DEV_GUILD_ID;
-
 if (!token || !clientId) {
   console.error('Missing DISCORD_TOKEN or DISCORD_CLIENT_ID in .env');
   process.exit(1);
@@ -119,12 +105,14 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.DirectMessages,
+    GatewayIntentBits.DirectMessageReactions,
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
-let state = { guilds: {}, notified: {} };
-let sourceCache = { fetchedAt: 0, events: [] };
+let state = { guilds: {}, users: {}, notified: {} };
+let scheduleCache = { fetchedAt: 0, events: [] };
 let pollRunning = false;
 let saveQueue = Promise.resolve();
 
@@ -132,39 +120,41 @@ function normalizeEmoji(value) {
   return String(value ?? '').replace(/\uFE0F/g, '');
 }
 
+function targetKey(scope, id) {
+  return `${scope}:${id}`;
+}
+
 function eventKey(event) {
   return `${event.timestamp}:${event.event}`;
 }
 
-function unixSeconds(ms) {
+function toUnix(ms) {
   return Math.floor(ms / 1000);
 }
 
 function buildPanelEmbed(leadMinutes, ownerUserId) {
-  const minors = EVENTS.filter((event) => event.type === 'minor')
-    .map((event) => `${event.emoji}  **${event.name}**`)
-    .join('\n');
-  const majors = EVENTS.filter((event) => event.type === 'major')
-    .map((event) => `${event.emoji}  **${event.name}**`)
-    .join('\n');
+  const list = (type) =>
+    EVENTS.filter((event) => event.type === type)
+      .map((event) => `${event.emoji} **${event.name}**`)
+      .join('\n');
 
   return new EmbedBuilder()
     .setTitle('Hypixel Pit Event Notifications')
     .setDescription(
-      `<@${ownerUserId}>: react with the emoji for every event you want to be notified about.\n` +
-        `Remove your reaction to disable that event. Notifications mention **you** and are sent **${leadMinutes} minutes before** an event.`,
+      `<@${ownerUserId}>: react to the events you want to be notified about.\n` +
+        `Remove a reaction to unsubscribe. Reminders are sent **${leadMinutes} minute(s) before** the event.`,
     )
     .addFields(
-      { name: 'Minor Events', value: minors, inline: true },
-      { name: 'Major Events', value: majors, inline: true },
+      { name: 'Minor Events', value: list('minor'), inline: true },
+      { name: 'Major Events', value: list('major'), inline: true },
     )
-    .setFooter({ text: 'Event schedule: brookeafk.com data' })
+    .setFooter({ text: 'Schedule source: brookeafk.com event data' })
     .setTimestamp();
 }
 
 function buildNotificationEmbed(event, leadMinutes) {
   const meta = EVENT_BY_NAME.get(event.event);
-  const starts = unixSeconds(event.timestamp);
+  const starts = toUnix(event.timestamp);
   return new EmbedBuilder()
     .setTitle(`${meta?.emoji ?? '🔔'} ${event.event}`)
     .setDescription(`A **${event.type.toUpperCase()}** event is starting soon.`)
@@ -179,9 +169,8 @@ function buildNotificationEmbed(event, leadMinutes) {
 function buildUpcomingEmbed(events) {
   const lines = events.map((event) => {
     const meta = EVENT_BY_NAME.get(event.event);
-    const starts = unixSeconds(event.timestamp);
-    const tag = event.type === 'major' ? 'Major' : 'Minor';
-    return `${meta?.emoji ?? '•'} **${event.event}** · ${tag} · <t:${starts}:R> · <t:${starts}:t>`;
+    const starts = toUnix(event.timestamp);
+    return `${meta?.emoji ?? '•'} **${event.event}** · ${event.type === 'major' ? 'Major' : 'Minor'} · <t:${starts}:R>`;
   });
 
   return new EmbedBuilder()
@@ -193,10 +182,10 @@ function buildUpcomingEmbed(events) {
 
 async function loadState() {
   try {
-    const raw = await fs.readFile(STATE_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(await fs.readFile(STATE_FILE, 'utf8'));
     state = {
       guilds: parsed.guilds ?? {},
+      users: parsed.users ?? {},
       notified: parsed.notified ?? {},
     };
   } catch (error) {
@@ -214,34 +203,26 @@ function persistState() {
       await fs.rename(temp, STATE_FILE);
     })
     .catch((error) => console.error('Failed to persist state:', error));
-
   return saveQueue;
 }
 
 async function fetchSchedule(force = false) {
   const now = Date.now();
-  if (!force && sourceCache.events.length && now - sourceCache.fetchedAt < SOURCE_REFRESH_MS) {
-    return sourceCache.events;
+  if (!force && scheduleCache.events.length && now - scheduleCache.fetchedAt < SOURCE_REFRESH_MS) {
+    return scheduleCache.events;
   }
 
   try {
     const response = await fetch(`${SOURCE_URL}?t=${now}`, {
-      headers: {
-        'User-Agent': 'pit-event-notifier/1.0',
-        Accept: 'application/json,text/plain;q=0.9,*/*;q=0.8',
-        'Cache-Control': 'no-cache',
-      },
+      headers: { 'User-Agent': 'pit-event-notifier/1.1', 'Cache-Control': 'no-cache' },
       signal: AbortSignal.timeout(10_000),
     });
-
-    if (!response.ok) {
-      throw new Error(`Schedule source returned HTTP ${response.status}`);
-    }
+    if (!response.ok) throw new Error(`Schedule source returned HTTP ${response.status}`);
 
     const data = await response.json();
     if (!Array.isArray(data)) throw new Error('Schedule source did not return an array');
 
-    const cleaned = data
+    const events = data
       .filter(
         (item) =>
           item &&
@@ -252,101 +233,117 @@ async function fetchSchedule(force = false) {
       )
       .sort((a, b) => a.timestamp - b.timestamp);
 
-    sourceCache = { fetchedAt: now, events: cleaned };
-    return cleaned;
+    scheduleCache = { fetchedAt: now, events };
+    return events;
   } catch (error) {
-    if (sourceCache.events.length) {
-      console.warn('Using cached schedule after source refresh failed:', error.message);
-      return sourceCache.events;
+    if (scheduleCache.events.length) {
+      console.warn('Using cached schedule:', error.message);
+      return scheduleCache.events;
     }
     throw error;
   }
 }
 
-async function fetchPanel(guildConfig) {
-  const channel = await client.channels.fetch(guildConfig.panelChannelId).catch(() => null);
+async function fetchPanel(config) {
+  let channel = await client.channels.fetch(config.panelChannelId).catch(() => null);
+  if (!channel && config.mode === 'dm') {
+    const user = await client.users.fetch(config.ownerUserId).catch(() => null);
+    channel = await user?.createDM().catch(() => null);
+  }
   if (!channel?.isTextBased()) return null;
-
-  const message = await channel.messages.fetch(guildConfig.panelMessageId).catch(() => null);
-  return message;
+  return channel.messages.fetch(config.panelMessageId).catch(() => null);
 }
 
-async function isEventSelected(guildConfig, eventName) {
-  const event = EVENT_BY_NAME.get(eventName);
-  if (!event || !guildConfig.ownerUserId) return false;
+async function isSelected(config, eventName) {
+  const meta = EVENT_BY_NAME.get(eventName);
+  if (!meta || !config.ownerUserId) return false;
 
-  const panel = await fetchPanel(guildConfig);
+  const panel = await fetchPanel(config);
   if (!panel) return false;
 
   const reaction = panel.reactions.cache.find(
-    (candidate) => normalizeEmoji(candidate.emoji.name) === normalizeEmoji(event.emoji),
+    (item) => normalizeEmoji(item.emoji.name) === normalizeEmoji(meta.emoji),
   );
-
   if (!reaction) return false;
 
   const users = await reaction.users.fetch();
-  return users.has(guildConfig.ownerUserId);
+  return users.has(config.ownerUserId);
 }
 
-async function sendEventNotification(guildId, config, event) {
-  const channel = await client.channels.fetch(config.notifyChannelId).catch(() => null);
+async function sendNotification(scope, config, event) {
+  if (!(await isSelected(config, event.event))) return true;
+
+  let channel = null;
+  if (scope === 'guild') {
+    channel = await client.channels.fetch(config.notifyChannelId).catch(() => null);
+  } else {
+    const user = await client.users.fetch(config.ownerUserId).catch(() => null);
+    channel = await user?.createDM().catch(() => null);
+  }
+
   if (!channel?.isTextBased()) return false;
-
-  if (!config.ownerUserId) return true;
-
-  const selected = await isEventSelected(config, event.event);
-  if (!selected) return true;
 
   await channel.send({
     content: `<@${config.ownerUserId}>`,
     embeds: [buildNotificationEmbed(event, config.leadMinutes ?? DEFAULT_LEAD_MINUTES)],
     allowedMentions: { users: [config.ownerUserId] },
   });
-
   return true;
 }
 
 function pruneNotified() {
   const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-  for (const [guildId, entries] of Object.entries(state.notified)) {
-    for (const [key, timestamp] of Object.entries(entries)) {
-      if (timestamp < cutoff) delete entries[key];
+  for (const [bucket, entries] of Object.entries(state.notified)) {
+    for (const [key, sentAt] of Object.entries(entries)) {
+      if (sentAt < cutoff) delete entries[key];
     }
-    if (!Object.keys(entries).length) delete state.notified[guildId];
+    if (!Object.keys(entries).length) delete state.notified[bucket];
   }
+}
+
+async function processTarget(scope, id, config, schedule, now) {
+  if (config.paused) return false;
+
+  const leadMs = (config.leadMinutes ?? DEFAULT_LEAD_MINUTES) * 60_000;
+  const bucket = targetKey(scope, id);
+  let dirty = false;
+
+  for (const event of schedule) {
+    const reminderAt = event.timestamp - leadMs;
+    if (event.timestamp < now - 60_000) continue;
+    if (reminderAt > now) break;
+    if (config.resumeAt && reminderAt < config.resumeAt) continue;
+
+    const key = eventKey(event);
+    state.notified[bucket] ??= {};
+    if (state.notified[bucket][key]) continue;
+
+    try {
+      if (await sendNotification(scope, config, event)) {
+        state.notified[bucket][key] = now;
+        dirty = true;
+      }
+    } catch (error) {
+      console.error(`Failed to notify ${scope} ${id} about ${key}:`, error);
+    }
+  }
+
+  return dirty;
 }
 
 async function pollNotifications() {
   if (pollRunning) return;
   pollRunning = true;
-
   try {
     const now = Date.now();
     const schedule = await fetchSchedule();
     let dirty = false;
 
     for (const [guildId, config] of Object.entries(state.guilds)) {
-      const leadMinutes = config.leadMinutes ?? DEFAULT_LEAD_MINUTES;
-      const leadMs = leadMinutes * 60_000;
-      for (const event of schedule) {
-        const until = event.timestamp - now;
-        if (until < -60_000) continue;
-        if (until > leadMs) break;
-
-        const key = eventKey(event);
-        state.notified[guildId] ??= {};
-        if (state.notified[guildId][key]) continue;
-
-        try {
-          const handled = await sendEventNotification(guildId, config, event);
-          if (handled) {
-            state.notified[guildId][key] = now;
-            dirty = true;
-          }
-        } catch (error) {
-          console.error(`Failed to notify guild ${guildId} about ${key}:`, error);
-        }
-      }
+      if (await processTarget('guild', guildId, config, schedule, now)) dirty = true;
+    }
+    for (const [userId, config] of Object.entries(state.users)) {
+      if (await processTarget('dm', userId, config, schedule, now)) dirty = true;
     }
 
     const before = JSON.stringify(state.notified);
@@ -361,70 +358,81 @@ async function pollNotifications() {
 }
 
 async function addPanelReactions(message) {
-  for (const event of EVENTS) {
-    await message.react(event.emoji);
-  }
+  for (const event of EVENTS) await message.react(event.emoji);
+}
+
+function canManageGuild(interaction) {
+  return interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ?? false;
+}
+
+async function requireGuildManager(interaction, subcommand) {
+  if (!interaction.inGuild() || subcommand === 'upcoming') return true;
+  if (canManageGuild(interaction)) return true;
+  await interaction.reply({ content: 'You need **Manage Server** to change Pit notification settings.', ephemeral: true });
+  return false;
 }
 
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(token);
-  if (devGuildId) {
-    await rest.put(Routes.applicationGuildCommands(clientId, devGuildId), { body: commands });
-    console.log(`Registered guild commands for ${devGuildId}`);
-  } else {
-    await rest.put(Routes.applicationCommands(clientId), { body: commands });
-    console.log('Registered global commands');
-  }
+  await rest.put(Routes.applicationCommands(clientId), { body: [commandJson] });
+  console.log('Registered global /pit command for guilds and bot DMs');
 }
 
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   await loadState();
-  await fetchSchedule(true).catch((error) => console.warn('Initial schedule fetch failed:', error));
+  await fetchSchedule(true).catch((error) => console.warn('Initial schedule fetch failed:', error.message));
   await pollNotifications();
   setInterval(pollNotifications, POLL_MS);
 });
 
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand() || interaction.commandName !== 'pit') return;
-  if (!interaction.inGuild()) {
-    await interaction.reply({ content: 'This command can only be used in a server.', ephemeral: true });
-    return;
-  }
 
   const subcommand = interaction.options.getSubcommand();
+  if (!(await requireGuildManager(interaction, subcommand))) return;
+
+  const inGuild = interaction.inGuild();
+  const store = inGuild ? state.guilds : state.users;
+  const id = inGuild ? interaction.guildId : interaction.user.id;
+  const bucket = targetKey(inGuild ? 'guild' : 'dm', id);
 
   try {
     if (subcommand === 'setup') {
-      const channel = interaction.options.getChannel('channel', true);
       const leadMinutes = interaction.options.getInteger('minutes') ?? DEFAULT_LEAD_MINUTES;
+      let channel = interaction.channel;
 
-      if (!channel.isTextBased()) {
-        await interaction.reply({ content: 'Choose a text-based channel.', ephemeral: true });
+      if (inGuild) {
+        channel = interaction.options.getChannel('channel') ?? interaction.channel;
+        if (!channel?.isTextBased()) {
+          await interaction.reply({ content: 'Choose a text-based channel.', ephemeral: true });
+          return;
+        }
+
+        const permissions = channel.permissionsFor(interaction.guild.members.me);
+        const needed = [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.EmbedLinks,
+          PermissionFlagsBits.AddReactions,
+          PermissionFlagsBits.ReadMessageHistory,
+        ];
+        if (needed.some((permission) => !permissions?.has(permission))) {
+          await interaction.reply({
+            content: 'I need View Channel, Send Messages, Embed Links, Add Reactions, and Read Message History in that channel.',
+            ephemeral: true,
+          });
+          return;
+        }
+      } else if (!channel?.isTextBased()) {
+        await interaction.reply({ content: 'This DM channel is unavailable.' });
         return;
       }
 
-      const permissions = channel.permissionsFor(interaction.guild.members.me);
-      const needed = [
-        PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.SendMessages,
-        PermissionFlagsBits.EmbedLinks,
-        PermissionFlagsBits.AddReactions,
-        PermissionFlagsBits.ReadMessageHistory,
-      ];
-      const missing = needed.filter((permission) => !permissions?.has(permission));
-      if (missing.length) {
-        await interaction.reply({
-          content: 'I need View Channel, Send Messages, Embed Links, Add Reactions, and Read Message History in that channel.',
-          ephemeral: true,
-        });
-        return;
-      }
+      await interaction.deferReply({ ephemeral: inGuild });
 
-      await interaction.deferReply({ ephemeral: true });
-
-      const previous = state.guilds[interaction.guildId];
-      if (previous?.panelMessageId && previous?.panelChannelId) {
+      const previous = store[id];
+      if (previous?.panelMessageId) {
         const previousPanel = await fetchPanel(previous);
         await previousPanel?.delete().catch(() => null);
       }
@@ -432,81 +440,115 @@ client.on('interactionCreate', async (interaction) => {
       const panel = await channel.send({ embeds: [buildPanelEmbed(leadMinutes, interaction.user.id)] });
       await addPanelReactions(panel);
 
-      state.guilds[interaction.guildId] = {
+      store[id] = {
+        mode: inGuild ? 'guild' : 'dm',
         panelChannelId: channel.id,
         panelMessageId: panel.id,
-        notifyChannelId: channel.id,
+        notifyChannelId: inGuild ? channel.id : null,
         leadMinutes,
         ownerUserId: interaction.user.id,
+        paused: false,
+        resumeAt: null,
       };
-      delete state.notified[interaction.guildId];
+      delete state.notified[bucket];
       await persistState();
 
-      await interaction.editReply(`Notification panel created in <#${channel.id}>.`);
-      return;
-    }
-
-    if (subcommand === 'minutes') {
-      const value = interaction.options.getInteger('value', true);
-      const config = state.guilds[interaction.guildId];
-      if (!config) {
-        await interaction.reply({ content: 'Run `/pit setup` first.', ephemeral: true });
-        return;
-      }
-
-      config.leadMinutes = value;
-      delete state.notified[interaction.guildId];
-      await persistState();
-
-      const panel = await fetchPanel(config);
-      if (panel) await panel.edit({ embeds: [buildPanelEmbed(value, config.ownerUserId)] });
-
-      await interaction.reply({ content: `Notifications will now be sent ${value} minute(s) before events.`, ephemeral: true });
-      return;
-    }
-
-    if (subcommand === 'status') {
-      const config = state.guilds[interaction.guildId];
-      if (!config) {
-        await interaction.reply({ content: 'This server is not configured yet. Run `/pit setup`.', ephemeral: true });
-        return;
-      }
-
-      await interaction.reply({
-        content:
-          `Panel: <#${config.panelChannelId}>\n` +
-          `Notifications: <#${config.notifyChannelId}>\n` +
-          `Lead time: **${config.leadMinutes ?? DEFAULT_LEAD_MINUTES} min**\n` +
-          `Mention: <@${config.ownerUserId}>`,
-        ephemeral: true,
-      });
+      await interaction.editReply(
+        inGuild
+          ? `Notification panel created in <#${channel.id}>.`
+          : 'DM notifications are configured. React to the event emojis in the panel above.',
+      );
       return;
     }
 
     if (subcommand === 'upcoming') {
       const count = interaction.options.getInteger('count') ?? 10;
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ ephemeral: inGuild });
       const schedule = await fetchSchedule(true);
       const upcoming = schedule.filter((event) => event.timestamp > Date.now() - 30_000).slice(0, count);
       await interaction.editReply({ embeds: [buildUpcomingEmbed(upcoming)] });
       return;
     }
 
-    if (subcommand === 'reset') {
-      const config = state.guilds[interaction.guildId];
-      if (config) {
-        const panel = await fetchPanel(config);
-        await panel?.delete().catch(() => null);
-        delete state.guilds[interaction.guildId];
-        delete state.notified[interaction.guildId];
-        await persistState();
-      }
+    const config = store[id];
+    if (!config) {
+      await interaction.reply({ content: 'Run `/pit setup` first.', ephemeral: inGuild });
+      return;
+    }
 
-      await interaction.reply({ content: 'Pit event notifications have been disabled for this server.', ephemeral: true });
+    if (subcommand === 'minutes') {
+      const value = interaction.options.getInteger('value', true);
+      config.leadMinutes = value;
+      delete state.notified[bucket];
+      await persistState();
+
+      const panel = await fetchPanel(config);
+      if (panel) await panel.edit({ embeds: [buildPanelEmbed(value, config.ownerUserId)] });
+
+      await interaction.reply({
+        content: `Notifications will now be sent ${value} minute(s) before events.`,
+        ephemeral: inGuild,
+      });
+      return;
+    }
+
+    if (subcommand === 'pause') {
+      if (config.paused) {
+        await interaction.reply({ content: 'Pit event notifications are already paused.', ephemeral: inGuild });
+        return;
+      }
+      config.paused = true;
+      config.pausedAt = Date.now();
+      await persistState();
+      await interaction.reply({
+        content: 'Notifications are paused. Your event selections and reminder settings are still saved.',
+        ephemeral: inGuild,
+      });
+      return;
+    }
+
+    if (subcommand === 'resume') {
+      if (!config.paused) {
+        await interaction.reply({ content: 'Pit event notifications are already active.', ephemeral: inGuild });
+        return;
+      }
+      config.paused = false;
+      config.resumeAt = Date.now();
+      delete config.pausedAt;
+      await persistState();
+      await interaction.reply({
+        content: 'Notifications are active again. Your previous settings have been kept.',
+        ephemeral: inGuild,
+      });
+      return;
+    }
+
+    if (subcommand === 'status') {
+      await interaction.reply({
+        content: inGuild
+          ? `Status: **${config.paused ? 'Paused' : 'Active'}**\nPanel: <#${config.panelChannelId}>\nNotifications: <#${config.notifyChannelId}>\nLead time: **${config.leadMinutes ?? DEFAULT_LEAD_MINUTES} min**\nMention: <@${config.ownerUserId}>`
+          : `Status: **${config.paused ? 'Paused' : 'Active'}**\nDelivery: **Direct Message**\nLead time: **${config.leadMinutes ?? DEFAULT_LEAD_MINUTES} min**\nMention: <@${config.ownerUserId}>`,
+        ephemeral: inGuild,
+      });
+      return;
+    }
+
+    if (subcommand === 'reset') {
+      const panel = await fetchPanel(config);
+      await panel?.delete().catch(() => null);
+      delete store[id];
+      delete state.notified[bucket];
+      await persistState();
+      await interaction.reply({
+        content: inGuild
+          ? 'Pit event notifications have been disabled for this server.'
+          : 'Pit event DM notifications have been disabled for you.',
+        ephemeral: inGuild,
+      });
     }
   } catch (error) {
     console.error('Slash command failed:', error);
-    const payload = { content: 'Something went wrong while handling that command.', ephemeral: true };
+    const payload = { content: 'Something went wrong while handling that command.', ephemeral: inGuild };
     if (interaction.deferred || interaction.replied) await interaction.editReply(payload).catch(() => null);
     else await interaction.reply(payload).catch(() => null);
   }
@@ -515,10 +557,8 @@ client.on('interactionCreate', async (interaction) => {
 client.on('messageReactionAdd', async (reaction, user) => {
   if (user.bot) return;
   if (reaction.partial) await reaction.fetch().catch(() => null);
-  const guildId = reaction.message.guildId;
-  if (!guildId) return;
 
-  const config = state.guilds[guildId];
+  const config = reaction.message.guildId ? state.guilds[reaction.message.guildId] : state.users[user.id];
   if (!config || reaction.message.id !== config.panelMessageId) return;
 
   const event = EVENT_BY_EMOJI.get(normalizeEmoji(reaction.emoji.name));
