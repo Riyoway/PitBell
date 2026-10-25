@@ -1,43 +1,64 @@
 # Pit Event Notifier
 
-A lightweight Discord bot for Hypixel Pit event reminders.
+A lightweight Discord bot for Hypixel Pit event reminders in servers and bot DMs.
 
-The bot uses the same public event schedule consumed by [brookeafk.com](https://brookeafk.com/) and lets a server administrator choose which events to receive reminders for using emoji reactions.
+The bot uses the same public event schedule consumed by [brookeafk.com](https://brookeafk.com/) and lets you choose which events to receive reminders for with emoji reactions.
 
 ## Features
 
-- Slash-command configuration
-- Major and Minor Pit event support
+- Slash commands
+- Server and bot-DM support
+- Major and Minor Pit events
 - Emoji-based event selection
 - Mentions the user who ran `/pit setup`
 - Configurable reminder time from 1 to 30 minutes before an event
-- Discord relative timestamps for upcoming events
+- Pause and resume notifications without losing settings
+- Discord relative timestamps
 - Persistent configuration and duplicate-notification protection
 - Direct schedule fetching with no HTML scraping
 - No Message Content privileged intent required
 
-## How event selection works
+## How it works
 
-Run:
+Run `/pit setup`, then react to the events you want to follow.
+
+### Server
 
 ```text
 /pit setup channel:#pit-events minutes:5
 ```
 
-The bot posts a configuration embed containing every supported event and automatically adds the corresponding emoji reactions.
+`channel` is optional. If omitted, the bot uses the channel where the command was run.
 
-The user who runs `/pit setup` becomes the notification owner for that server configuration.
+The user who runs `/pit setup` becomes the notification owner for that server configuration. Only that user's reactions on the setup panel are used, and reminders mention that user.
 
-- React to an event emoji to enable notifications for that event.
-- Remove the reaction to disable notifications for that event.
-- Only the setup user's reactions are used for event selection.
-- When a selected event is approaching, the bot mentions the setup user in the configured channel.
+### DM
 
-Running `/pit setup` again replaces the previous setup and changes the notification owner to the user who ran the new command.
+Open a DM with the bot and run:
+
+```text
+/pit setup minutes:5
+```
+
+The setup panel is posted directly in the DM. Selected event reminders are then sent to the same DM and mention the user who configured them.
+
+## Commands
+
+| Command | Description |
+| --- | --- |
+| `/pit setup [channel] [minutes]` | Create or replace the event selection panel |
+| `/pit minutes value:3` | Change the reminder lead time |
+| `/pit pause` | Pause notifications while keeping all settings |
+| `/pit resume` | Resume notifications with the existing settings |
+| `/pit status` | Show the current configuration and pause state |
+| `/pit upcoming count:10` | Show upcoming Pit events |
+| `/pit reset` | Remove the current configuration and stop notifications |
+
+In servers, changing notification settings requires **Manage Server**. `/pit upcoming` can be used without changing the configuration.
 
 ## Supported events
 
-### Minor events
+### Minor
 
 | Emoji | Event |
 | --- | --- |
@@ -51,7 +72,7 @@ Running `/pit setup` again replaces the previous setup and changes the notificat
 | 🍰 | Giant Cake |
 | 🪙 | All bounty |
 
-### Major events
+### Major
 
 | Emoji | Event |
 | --- | --- |
@@ -69,15 +90,12 @@ Running `/pit setup` again replaces the previous setup and changes the notificat
 
 - Node.js 20 or newer
 - A Discord application with a bot user
-- Permission to manage the Discord server where the bot is configured
 
 ## Installation
 
-Clone the repository and install dependencies:
-
 ```bash
-git clone <your-repository-url>
-cd pit-event-notifier
+git clone https://github.com/Riyoway/pit-event-bot.git
+cd pit-event-bot
 npm install
 ```
 
@@ -87,7 +105,7 @@ Create the environment file:
 cp .env.example .env
 ```
 
-On Windows PowerShell:
+PowerShell:
 
 ```powershell
 Copy-Item .env.example .env
@@ -98,57 +116,65 @@ Configure `.env`:
 ```env
 DISCORD_TOKEN=your_bot_token
 DISCORD_CLIENT_ID=your_application_id
-DEV_GUILD_ID=your_test_server_id
 ```
 
-`DEV_GUILD_ID` is optional. During development, setting it registers slash commands only in that server so command updates appear quickly. Leave it empty for global command registration.
-
-Never commit your `.env` file or Discord bot token. The included `.gitignore` already excludes `.env`.
+Never commit `.env` or your bot token.
 
 ## Discord application setup
 
-In the Discord Developer Portal, create an application and bot, then invite it with these OAuth2 scopes:
+In the Discord Developer Portal, use **Guild Install** with these scopes:
 
 - `bot`
 - `applications.commands`
 
-The bot needs the following permissions in the channel used by `/pit setup`:
+Recommended bot permissions:
 
-- View Channel
+- View Channels
 - Send Messages
 - Embed Links
 - Add Reactions
 - Read Message History
 
-The bot does not require the Message Content privileged intent.
+No privileged gateway intents are required.
 
-## Running the bot
+The `/pit` command is registered globally with both **Guild** and **Bot DM** command contexts. Global registration is required for DM command support.
+
+This project uses a normal bot installation for proactive scheduled DM reminders. It does not rely on a User Install-only app.
+
+## Running
 
 ```bash
 npm start
 ```
 
-To perform a syntax check without starting the bot:
+Syntax check:
 
 ```bash
 npm run check
 ```
 
-## Commands
+## Pausing notifications
 
-| Command | Description |
-| --- | --- |
-| `/pit setup channel:#pit-events minutes:5` | Create or replace the event selection panel |
-| `/pit minutes value:3` | Change the reminder lead time |
-| `/pit status` | Show the current configuration |
-| `/pit upcoming count:10` | Show upcoming Pit events |
-| `/pit reset` | Remove the server configuration and stop notifications |
+```text
+/pit pause
+```
 
-The `/pit` command requires the **Manage Server** permission by default.
+This pauses reminders but keeps:
+
+- selected event reactions
+- reminder lead time
+- server channel or DM delivery target
+- notification owner
+
+Resume with:
+
+```text
+/pit resume
+```
+
+Events whose normal reminder time passed while notifications were paused are not sent later as catch-up notifications.
 
 ## Notification example
-
-When a selected event is approaching, the configured user is mentioned and an embed is sent with the event type and Discord timestamps.
 
 ```text
 @User
@@ -159,57 +185,24 @@ Starts: in 5 minutes
 
 ## Event data source
 
-The bot fetches the public event schedule from:
+The bot fetches the public schedule from:
 
 ```text
 https://raw.githubusercontent.com/BrookeAFK/brookeafk-api/main/events.js
 ```
 
-The source currently returns a JSON array in this format:
-
-```json
-[
-  {
-    "event": "Pizza",
-    "timestamp": 1792920060000,
-    "type": "major"
-  }
-]
-```
-
-The bot refreshes this schedule periodically and keeps the last successfully fetched schedule in memory if a refresh fails.
+Entries contain an event name, timestamp, and Major/Minor type. The schedule is refreshed periodically. If a refresh fails, the last successfully fetched schedule is kept in memory.
 
 ## Runtime data
 
-Server configuration and sent-notification IDs are stored locally in:
+Configuration and duplicate-notification state are stored locally in:
 
 ```text
 data/state.json
 ```
 
-This file is generated automatically and is excluded from Git.
-
-## Project structure
-
-```text
-pit-event-notifier/
-├─ src/
-│  └─ index.js
-├─ data/
-│  └─ .gitkeep
-├─ .env.example
-├─ .gitignore
-├─ LICENSE
-├─ package.json
-└─ README.md
-```
-
-## Disclaimer
-
-This project is not affiliated with, endorsed by, or associated with Hypixel or BrookeAFK.
-
-Event availability and timing depend on the external schedule source and may change if that source changes or becomes unavailable.
+The file is ignored by Git and is created automatically at runtime.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE).
+MIT
