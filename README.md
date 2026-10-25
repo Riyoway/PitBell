@@ -21,6 +21,7 @@ Choose the events you care about from a multi-select menu and get mentioned befo
 - 🔔 Notifications for selected **Major** and **Minor** Pit events
 - 🎛️ Multi-select event menu with native Discord components
 - ⚡ Quick buttons for **Minor**, **Major**, **All**, **Clear**, and **Pause / Resume**
+- ⌛ Setup panels automatically expire and are replaced with an expired-state message
 - 💬 Works in Discord servers and bot DMs
 - ⏱️ Configurable reminders from 1 to 30 minutes before an event
 - 🕒 Discord relative timestamps for upcoming events
@@ -66,6 +67,8 @@ The panel uses Discord's native message components instead of reactions:
 - **All** — select all supported events
 - **Clear** — remove all event selections
 - **Pause / Resume** — stop or restart reminders without losing the selection
+
+By default, a setup panel expires after **15 minutes**. When it expires, the original message is updated to show that the panel is no longer interactive and its components are removed. Your selected events, reminder time, pause state, and notification target remain saved. Run `/pit setup` again to open a fresh panel.
 
 Existing reaction-based configurations are migrated automatically on startup when possible.
 
@@ -158,6 +161,8 @@ DISCORD_TOKEN=your_bot_token
 DISCORD_CLIENT_ID=your_application_id
 # Optional: URL used by the Discord Streaming presence
 STREAM_URL=https://www.twitch.tv/hypixel
+# Optional: setup panel lifetime in minutes
+PANEL_TIMEOUT_MINUTES=15
 ```
 
 > [!IMPORTANT]
