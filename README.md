@@ -10,7 +10,7 @@
 
 **Discord reminders for selected Hypixel Pit events.**
 
-Choose the events you care about with emoji reactions and get mentioned before they start, in a server or directly in the bot's DMs.
+Choose the events you care about from a multi-select menu and get mentioned before they start, in a server or directly in the bot's DMs.
 
 </div>
 
@@ -19,12 +19,14 @@ Choose the events you care about with emoji reactions and get mentioned before t
 ## Features
 
 - 🔔 Notifications for selected **Major** and **Minor** Pit events
-- 🎯 Emoji-based event selection
+- 🎛️ Multi-select event menu with native Discord components
+- ⚡ Quick buttons for **Minor**, **Major**, **All**, **Clear**, and **Pause / Resume**
 - 💬 Works in Discord servers and bot DMs
 - ⏱️ Configurable reminders from 1 to 30 minutes before an event
-- ⏸️ Pause and resume notifications without losing your setup
 - 🕒 Discord relative timestamps for upcoming events
+- 📺 Streaming presence showing the current or next Pit event
 - 💾 Persistent configuration with duplicate-notification protection
+- 🔄 Automatic migration from the old reaction-based setup
 - ⚡ Direct event-schedule fetching with no HTML scraping
 - 🛡️ No Message Content privileged intent required
 
@@ -42,7 +44,7 @@ Run:
 
 `channel` is optional. If omitted, the bot uses the channel where the command was run.
 
-The user who runs `/pit setup` becomes the notification owner for that server configuration. Only that user's reactions on the setup panel are used, and reminders mention that user.
+The user who runs `/pit setup` becomes the notification owner for that server configuration. Use the dropdown to select events, or use the quick-selection buttons below it. Reminders mention that user.
 
 ### DM
 
@@ -52,7 +54,20 @@ Open a DM with the bot and run:
 /pit setup minutes:5
 ```
 
-The setup panel is posted directly in the DM. Selected event reminders are sent back to the same DM and mention the user who configured them.
+The setup panel is posted directly in the DM. Choose events from the dropdown and selected event reminders are sent back to the same DM.
+
+## Setup panel
+
+The panel uses Discord's native message components instead of reactions:
+
+- **Event dropdown** — select one or multiple events at once
+- **Minor** — select every Minor event
+- **Major** — select every Major event
+- **All** — select all supported events
+- **Clear** — remove all event selections
+- **Pause / Resume** — stop or restart reminders without losing the selection
+
+Existing reaction-based configurations are migrated automatically on startup when possible.
 
 ## Commands
 
@@ -141,6 +156,8 @@ Configure `.env`:
 ```env
 DISCORD_TOKEN=your_bot_token
 DISCORD_CLIENT_ID=your_application_id
+# Optional: URL used by the Discord Streaming presence
+STREAM_URL=https://www.twitch.tv/hypixel
 ```
 
 > [!IMPORTANT]
@@ -158,10 +175,9 @@ Recommended bot permissions:
 - View Channels
 - Send Messages
 - Embed Links
-- Add Reactions
 - Read Message History
 
-No privileged gateway intents are required.
+No privileged gateway intents are required. Select menus and buttons do not require additional bot permissions.
 
 The `/pit` command is registered globally with both **Guild** and **Bot DM** command contexts. Global registration is required for DM command support.
 
@@ -181,7 +197,7 @@ npm run check
 
 ## Pausing notifications
 
-Run:
+Use the **Pause** button on the setup panel or run:
 
 ```text
 /pit pause
@@ -189,12 +205,12 @@ Run:
 
 This pauses reminders while keeping:
 
-- selected event reactions
+- selected events
 - reminder lead time
 - server channel or DM delivery target
 - notification owner
 
-Resume with:
+Resume from the panel or with:
 
 ```text
 /pit resume
